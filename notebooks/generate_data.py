@@ -14,7 +14,8 @@
 # MAGIC    registered in Unity Catalog. Probability drives `AUTO` (>= 0.9), `REVIEW` (0.5 to 0.9) or `NOMINATE` (< 0.5 or no
 # MAGIC    candidate); nominated observations are clustered by label propagation in Spark SQL.
 # MAGIC 3. **GenAI:** a sourced object dossier with `ai_query`, with every citation checked against the retrieved reports.
-# MAGIC 4. **Presentation:** views for the AI/BI dashboard and Genie, plus a review queue with analyst write-back.
+# MAGIC 4. **Presentation:** views for the AI/BI dashboard, the Genie space (created or updated from `demo/genie-examples.md`),
+# MAGIC    plus a review queue with analyst write-back.
 # MAGIC
 # MAGIC > All data is synthetic. `true_object_id` is ground truth for scoring the demo only; it is never a model feature and
 # MAGIC > never appears in the dossier prompt. Model numbers printed here are **in-sample** unless labelled held-out.
@@ -1135,8 +1136,8 @@ displayHTML(m._repr_html_())
 # COMMAND ----------
 
 # MAGIC %md ## 14. Views for the AI/BI dashboard and Genie
-# MAGIC Point the dashboard at `dash_map_points`, `dash_decisions`, `dash_object_summary` and `review_queue`. For Genie, add
-# MAGIC `oms_objects`, `silver_model_decisions`, `gold_nominations`, `review_queue` and `object_dossiers`.
+# MAGIC Point the dashboard at `dash_map_points`, `dash_decisions`, `dash_object_summary` and `review_queue`. The Genie space
+# MAGIC is built in section 15.
 
 # COMMAND ----------
 
@@ -1158,6 +1159,132 @@ SELECT 'observation', b.obs_id, b.lat, b.lon, coalesce(b.reported_type, 'unident
 FROM {S}.silver_model_decisions d JOIN {S}.bronze_observations b ON b.obs_id = d.obs_id""")
 display(spark.table(f"{S}.dash_decisions"))
 display(spark.table(f"{S}.dash_object_summary"))
+
+# COMMAND ----------
+
+# MAGIC %md ## 15. Genie space (create or update)
+# MAGIC Builds the space from `demo/genie-examples.md` (instructions block, one example SQL per `###` heading; tables are the
+# MAGIC ones the examples query) and creates it, or updates the space with the same title. An update keeps everything else
+# MAGIC already set on the space, such as hidden columns or joins added in the UI. Feasibility: section 11 of
+# MAGIC `feasibility_tests.py`. If this cell fails, create the space by hand from the same file.
+
+# COMMAND ----------
+
+import hashlib  # noqa: E402
+
+from databricks.sdk import WorkspaceClient  # noqa: E402
+
+GENIE = "/api/2.0/genie/spaces"
+GENIE_TITLE = "Object resolution demo"
+GENIE_WAREHOUSE_ID = None  # None: the first SQL warehouse in the workspace
+GENIE_SAMPLE_QUESTIONS = [1, 5, 2]  # "Core demo" examples in genie-examples.md
+GENIE_MD = next(
+    (p for p in [_cwd.parent / "demo" / "genie-examples.md", _cwd / "demo" / "genie-examples.md"] if p.exists()),
+    None,
+)  # fmt: skip
+if GENIE_MD is None:
+    raise FileNotFoundError(f"demo/genie-examples.md not found from {_cwd}")
+
+
+def genie_id(*parts: str) -> str:
+    """Stable 32-hex ID, so a re-run produces the same payload."""
+    return hashlib.md5("|".join(parts).encode()).hexdigest()
+
+
+def parse_genie_md(text: str) -> tuple[str, list[tuple[int, str, str]]]:
+    """Return (space instructions, [(number, question, sql)]) from genie-examples.md, with this run's schema."""
+    text = text.replace("workspace.obj_resolution_demo", S)
+    instr = re.search(r"## Space instructions.*?```markdown\n(.*?)```", text, re.S)
+    examples = [
+        (int(n), q.strip(), sql_.strip())
+        for n, q, sql_ in re.findall(r"^### (\d+)\. (.+?)\n.*?```sql\n(.*?)```", text, re.S | re.M)
+    ]  # fmt: skip
+    if not instr or len(examples) != len(re.findall(r"^### \d+\. ", text, re.M)):
+        raise ValueError(
+            f"every ### example in {GENIE_MD} needs a ```sql block, plus the instructions block"
+        )
+    return instr.group(1).strip(), examples
+
+
+def by_id(items: list[dict]) -> list[dict]:
+    """Genie lists in ID order, as the API returns them."""
+    return sorted(items, key=lambda x: x["id"])
+
+
+instructions, examples = parse_genie_md(GENIE_MD.read_text())
+by_number = {n: q for n, q, _ in examples}
+missing = [n for n in GENIE_SAMPLE_QUESTIONS if n not in by_number]
+assert not missing, f"sample question numbers not in {GENIE_MD.name}: {missing}"
+tables = sorted(
+    {t for _, _, q in examples for t in re.findall(rf"{re.escape(S)}\.(\w+)", q)}
+)
+
+w = WorkspaceClient()
+existing = [
+    sp
+    for sp in w.api_client.do("GET", GENIE).get("spaces", [])
+    if sp.get("title") == GENIE_TITLE
+]
+if len(existing) > 1:
+    raise RuntimeError(
+        f"{len(existing)} Genie spaces titled {GENIE_TITLE!r}; trash the extras first"
+    )
+if existing:
+    got = w.api_client.do(
+        "GET",
+        f"{GENIE}/{existing[0]['space_id']}",
+        query={"include_serialized_space": "true"},
+    )
+    space = json.loads(got["serialized_space"])
+else:
+    got, space = {}, {"version": 2}
+
+# Replace only what genie-examples.md owns; keep table settings and anything else set in the UI.
+space.setdefault("config", {})["sample_questions"] = by_id(
+    [
+        {"id": genie_id("sample", by_number[n]), "question": [by_number[n]]}
+        for n in GENIE_SAMPLE_QUESTIONS
+    ]
+)
+space.setdefault("instructions", {})["text_instructions"] = [
+    {"id": genie_id("instructions"), "content": [instructions]}
+]
+space["instructions"]["example_question_sqls"] = by_id(
+    [
+        {"id": genie_id("example", q), "question": [q], "sql": [sql_]}
+        for _, q, sql_ in examples
+    ]
+)
+kept = {
+    t["identifier"]: t for t in space.setdefault("data_sources", {}).get("tables", [])
+}
+space["data_sources"]["tables"] = [
+    kept.get(f"{S}.{t}", {"identifier": f"{S}.{t}"}) for t in tables
+]
+
+body = {"title": GENIE_TITLE, "serialized_space": json.dumps(space)}
+# An update keeps the space's warehouse unless GENIE_WAREHOUSE_ID is set.
+if GENIE_WAREHOUSE_ID or not existing:
+    wh = GENIE_WAREHOUSE_ID or next((x.id for x in w.warehouses.list()), None)
+    if not wh:
+        raise RuntimeError(
+            "no SQL warehouse found; create one or set GENIE_WAREHOUSE_ID"
+        )
+    body["warehouse_id"] = wh
+if existing:
+    res = w.api_client.do(
+        "PATCH",
+        f"{GENIE}/{existing[0]['space_id']}",
+        body={**body, "etag": got.get("etag")},
+    )
+else:
+    res = w.api_client.do("POST", GENIE, body=body)
+    print(
+        "New space: hide true_object_id (bronze_observations) and dup_of (oms_objects) in the Genie UI once;"
+    )
+    print("later runs of this cell keep that setting.")
+NOTES["genie_space"] = f"{'updated' if existing else 'created'} {res['space_id']}"
+print(f"Genie space {NOTES['genie_space']}: {len(examples)} examples, tables {tables}")
 
 # COMMAND ----------
 

@@ -35,7 +35,8 @@
 # MAGIC | 8 | Unity Catalog row filters |
 # MAGIC | 9 | `folium` maps render via `displayHTML` |
 # MAGIC | 10 | `ai_query` endpoints respond and can produce a cited summary |
-# MAGIC | 11 | Manual UI checks (Genie, Databricks Apps, lineage, dashboards) |
+# MAGIC | 11 | Genie space create, export and update through the REST API (scripted setup) |
+# MAGIC | 12 | Manual UI checks (Genie, Databricks Apps, lineage, dashboards) |
 # MAGIC
 # MAGIC > This is a throwaway harness in its own schema (`feasibility_checks`), not part of any pipeline. All data is synthetic.
 # MAGIC > Uncomment the last cell to remove everything it created.
@@ -674,8 +675,129 @@ else:
 
 # COMMAND ----------
 
+# MAGIC %md ## 11. Genie space API (scripted create and update)
+# MAGIC Calls the REST endpoints through the SDK's API client, so it works whatever `databricks-sdk` version serverless ships.
+# MAGIC Creates a throwaway space on its own table, exports it, updates it with the etag, asks one question, then trashes it.
+
+# COMMAND ----------
+
+import uuid  # noqa: E402
+
+from databricks.sdk import WorkspaceClient  # noqa: E402
+
+GENIE = "/api/2.0/genie/spaces"
+GENIE_TITLE = "feasibility_genie_check"
+w = WorkspaceClient()
+genie_space_id = None
+genie_warehouse = None
+
+with check(
+    "SQL warehouse available for Genie",
+    "Create a SQL warehouse in the UI (Free Edition ships a starter warehouse)",
+):
+    whs = list(w.warehouses.list())
+    assert whs, "no SQL warehouse in this workspace"
+    genie_warehouse = whs[0].id
+    NOTES["genie_warehouse"] = f"{whs[0].name} ({genie_warehouse})"
+    print(NOTES["genie_warehouse"])
+
+if genie_warehouse:
+    with check(
+        "Genie space create, export and update via REST API",
+        "Create the space by hand from demo/genie-examples.md",
+    ):
+        spark.sql(f"""
+          CREATE OR REPLACE TABLE {S}.t_genie AS
+          SELECT * FROM VALUES ('Truck', 3), ('Aircraft', 2) AS t(object_type, n)""")
+        payload = {
+            "version": 2,
+            "config": {
+                "sample_questions": [
+                    {"id": uuid.uuid4().hex, "question": ["How many objects in total?"]}
+                ]
+            },
+            "data_sources": {"tables": [{"identifier": f"{S}.t_genie"}]},
+            "instructions": {
+                "text_instructions": [
+                    {"id": uuid.uuid4().hex, "content": ["Synthetic data."]}
+                ],
+                "example_question_sqls": [
+                    {
+                        "id": uuid.uuid4().hex,
+                        "question": ["How many objects by type?"],
+                        "sql": [f"SELECT object_type, n FROM {S}.t_genie"],
+                    }
+                ],
+            },
+        }
+        for sp in w.api_client.do("GET", GENIE).get("spaces", []):  # leftovers
+            if sp.get("title") == GENIE_TITLE:
+                w.api_client.do("DELETE", f"{GENIE}/{sp['space_id']}")
+        created = w.api_client.do(
+            "POST",
+            GENIE,
+            body={
+                "warehouse_id": genie_warehouse,
+                "title": GENIE_TITLE,
+                "serialized_space": json.dumps(payload),
+            },
+        )
+        genie_space_id = created["space_id"]
+        got = w.api_client.do(
+            "GET",
+            f"{GENIE}/{genie_space_id}",
+            query={"include_serialized_space": "true"},
+        )
+        exported = json.loads(got["serialized_space"])
+        NOTES["genie_serialized_keys"] = sorted(exported)
+        NOTES["genie_table_entry"] = exported["data_sources"]["tables"][0]
+        print("exported keys:", sorted(exported))
+        assert exported["instructions"]["example_question_sqls"], "example SQL lost"
+        exported["instructions"]["text_instructions"][0]["content"] = ["Updated."]
+        w.api_client.do(
+            "PATCH",
+            f"{GENIE}/{genie_space_id}",
+            body={"serialized_space": json.dumps(exported), "etag": got.get("etag")},
+        )
+        again = json.loads(
+            w.api_client.do(
+                "GET",
+                f"{GENIE}/{genie_space_id}",
+                query={"include_serialized_space": "true"},
+            )["serialized_space"]
+        )
+        assert again["instructions"]["text_instructions"][0]["content"] == [
+            "Updated."
+        ], "update did not apply"
+else:
+    skip(
+        "Genie space create, export and update via REST API",
+        "no SQL warehouse",
+        "Create the space by hand from demo/genie-examples.md",
+    )
+
+if genie_space_id:
+    with check(
+        "Genie answers a question in the API-created space",
+        "Ask the question in the Genie UI; or show the SQL",
+    ):
+        ans = w.genie.start_conversation_and_wait(
+            genie_space_id, "How many objects are there in total?"
+        )
+        print(ans.as_dict().get("attachments"))
+        assert ans.status.value == "COMPLETED", f"Genie status {ans.status}"
+    w.api_client.do("DELETE", f"{GENIE}/{genie_space_id}")  # trash the throwaway space
+else:
+    skip(
+        "Genie answers a question in the API-created space",
+        "space was not created",
+        "Ask the question in the Genie UI; or show the SQL",
+    )
+
+# COMMAND ----------
+
 # MAGIC %md
-# MAGIC ## 11. Manual checks (UI)
+# MAGIC ## 12. Manual checks (UI)
 # MAGIC - [ ] **Genie:** create a Genie space on any table in `feasibility_checks` (for example `t_merge_target`); ask a count question in plain English.
 # MAGIC - [ ] **Databricks Apps:** create an app from the Streamlit or Dash template; confirm it deploys and can query a table through the SQL warehouse.
 # MAGIC - [ ] **App map:** confirm folium or pydeck renders inside the app.

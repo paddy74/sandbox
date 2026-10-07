@@ -57,7 +57,7 @@ Rules for every slide: synthetic data only, and the word **synthetic** appears o
 
 **Pre-empts:** "Another silo?" (answer: same entity and catalog across layers), "too complex?" (answer: five features, one model, one SQL clustering step), "where is the trust?" (answer: lineage columns, analyst stays decider). Trade-offs to have ready are in file 02, section 3.
 
-**Honesty flags on this slide:** MLflow logging, Unity Catalog registration, Genie, Apps and the lineage graph are checked by the feasibility notebook (section 5 and the manual checks in section 11). If any is not verified in the target workspace when presenting, label it "planned" on the slide.
+**Honesty flags on this slide:** MLflow logging, Unity Catalog registration, Genie, Apps and the lineage graph are checked by the feasibility notebook (section 5 and the manual checks in section 12). If any is not verified in the target workspace when presenting, label it "planned" on the slide.
 
 ---
 

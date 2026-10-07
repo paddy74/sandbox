@@ -1,10 +1,10 @@
 # Genie examples: curated prompts and SQL
 
-Paste each into the Genie space as an **example SQL query** (title = the prompt, body = the SQL). All tables are in `workspace.obj_resolution_demo`. All data is synthetic. `true_object_id` and `dup_of` are hidden from Genie, and none of these queries use them.
+This file is the source of the Genie space: section 15 of `notebooks/generate_data.py` creates or updates the space from it (the instructions block, one example SQL per `###` heading, sample questions 1, 5 and 2, and every table the examples query). Edit here and re-run that cell; a section without a `sql` block fails the cell. All tables are in `workspace.obj_resolution_demo` (the cell swaps in the current catalog). All data is synthetic. Hide `true_object_id` and `dup_of` in the Genie UI once after the space is created; updates keep that, and none of these queries use them.
 
 I wrote these against the notebook's schema and could not run them on your workspace, so **run each once in the SQL editor** before saving it as a trusted example.
 
-## Space instructions (paste into the text instructions)
+## Space instructions
 
 ```markdown
 Data is synthetic. An observation is one report of something seen. An object is a tracked thing
@@ -159,7 +159,7 @@ LIMIT 10;
 ```
 
 ### 15. How many analyst decisions have been recorded?
-Add `review_decisions` to the Genie space first. It is empty until hero B's approval cell has run.
+`review_decisions` is empty until hero B's approval cell has run.
 ```sql
 SELECT decision, COUNT(*) AS decisions
 FROM workspace.obj_resolution_demo.review_decisions
