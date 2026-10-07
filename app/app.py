@@ -1,10 +1,11 @@
 """Analyst review screen (Layer 4): ranked review queue, candidate map, decision write-back.
 
-One screen: pick a pending review item, see why the model scored it (match probability,
-distance, type score, runner-up), see the candidate and runner-up on a map, read the dossier
-if one exists, then APPROVE or REJECT. The decision is written to ``review_decisions`` and an
-APPROVE also updates the object in ``oms_objects``, the same as ``adjudicate()`` in
-``notebooks/generate_data.py``. All data is synthetic.
+One screen: pick a pending observation, see in plain language why the model suggested an
+object (how sure it is, how far away, whether the type agrees, the next-best object), see both
+on a map, read the source report and the dossier if one exists, then confirm or reject the
+link. The decision is written to ``review_decisions`` and a confirm also updates the object in
+``oms_objects``, the same as ``adjudicate()`` in ``notebooks/generate_data.py``. System IDs are
+kept out of the main view and shown only as references. All data is synthetic.
 
 Deploy (Databricks Apps, Streamlit):
 1. Create an app from this folder. Add a **SQL warehouse** resource with key ``sql-warehouse``
@@ -17,6 +18,7 @@ Deploy (Databricks Apps, Streamlit):
 3. Run ``notebooks/generate_data.py`` first so the tables and views exist.
 """
 
+import math
 import os
 import re
 
@@ -38,6 +40,17 @@ if not WAREHOUSE_ID:
         "DATABRICKS_WAREHOUSE_ID is not set: add a SQL warehouse resource with key "
         "'sql-warehouse' to the app (see app.yaml)"
     )
+
+AUTO_T = 0.9  # same thresholds as notebooks/generate_data.py
+REVIEW_T = 0.5
+CLOSE_CALL_GAP = 0.15  # runner-up within this many points: say it is a close call
+
+SENSORS = {
+    "EO": "Electro-optical imagery",
+    "SAR": "Radar imagery (SAR)",
+    "FMV": "Full-motion video",
+}
+PRODUCERS = {"algorithm": "Automated detection", "analyst": "Analyst report"}
 
 cfg = Config()
 
@@ -64,7 +77,58 @@ def analyst_name() -> str:
         return "analyst_demo"
 
 
-def record_decision(obs_id: str, object_id: str, decision: str) -> str:
+def coords(lat: float, lon: float) -> str:
+    """Readable coordinates, e.g. 39.2134° N, 105.3312° W."""
+    return f"{abs(lat):.4f}° {'N' if lat >= 0 else 'S'}, {abs(lon):.4f}° {'E' if lon >= 0 else 'W'}"
+
+
+def object_label(object_type: str, designator: str | None) -> str:
+    """Human-readable object name: CCO type plus designator, e.g. 'Truck Bravo-12'."""
+    if not designator or pd.isna(designator):
+        raise ValueError(
+            f"{object_type} object has no designator: re-run notebooks/generate_data.py"
+        )
+    return f"{object_type} {designator}"
+
+
+def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Great-circle distance in metres."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    a = (
+        math.sin((p2 - p1) / 2) ** 2
+        + math.cos(p1) * math.cos(p2) * math.sin(math.radians(lon2 - lon1) / 2) ** 2
+    )
+    return 2 * 6_371_000 * math.asin(math.sqrt(a))
+
+
+def time_ago(ts: pd.Timestamp, now: pd.Timestamp) -> str:
+    """Age of a timestamp in words, e.g. '5 h ago' or '2 days ago'; both times are UTC."""
+    ts = pd.Timestamp(ts)
+    if ts.tzinfo is not None:  # the SQL connector may return tz-aware UTC
+        ts = ts.tz_convert(None)
+    hours = (now - ts).total_seconds() / 3600
+    if hours < 1:
+        return "under 1 h ago"
+    if hours < 48:
+        return f"{hours:.0f} h ago"
+    return f"{hours / 24:.0f} days ago"
+
+
+def source_label(producer: str, sensor: str) -> str:
+    """Who produced an observation and from what, e.g. 'Analyst report, Full-motion video'."""
+    return f"{PRODUCERS.get(producer, producer)}, {SENSORS.get(sensor, sensor)}"
+
+
+def type_agreement(reported: str | None, candidate: str) -> str:
+    """Plain-language version of the model's type score."""
+    if reported is None:
+        return "Source did not say what it saw (neutral)"
+    if reported == candidate:
+        return f"Agrees: reported as {reported}"
+    return f"Compatible: reported only as a general '{reported}'"
+
+
+def record_decision(obs_id: str, object_id: str, decision: str, label: str) -> str:
     """Write one analyst decision; APPROVE also updates the object. Returns a status message."""
     if decision not in ("APPROVE", "REJECT"):
         raise ValueError(f"decision must be APPROVE or REJECT, got {decision!r}")
@@ -74,148 +138,242 @@ def record_decision(obs_id: str, object_id: str, decision: str) -> str:
             {"obs": obs_id},
         )
     ):
-        return f"{obs_id} was already decided; no change."
+        return "This observation was already decided; nothing changed."
     run(
         f"INSERT INTO {SCHEMA}.review_decisions "
         "VALUES (:obs, :obj, :dec, :who, current_timestamp())",
         {"obs": obs_id, "obj": object_id, "dec": decision, "who": analyst_name()},
         fetch=False,
     )
-    if decision == "APPROVE":
-        run(
-            f"UPDATE {SCHEMA}.oms_objects SET obs_count = obs_count + 1, "
-            "last_seen = current_timestamp() WHERE object_id = :obj",
-            {"obj": object_id},
-            fetch=False,
-        )
-    return f"{decision}: {obs_id} -> {object_id}"
+    if decision == "REJECT":
+        return f"Rejected: the observation is not linked to {label}."
+    run(
+        f"UPDATE {SCHEMA}.oms_objects SET obs_count = obs_count + 1, "
+        "last_seen = current_timestamp() WHERE object_id = :obj",
+        {"obj": object_id},
+        fetch=False,
+    )
+    n = run(
+        f"SELECT obs_count FROM {SCHEMA}.oms_objects WHERE object_id = :obj",
+        {"obj": object_id},
+    )
+    total = f" It now has {int(n.iloc[0, 0])} linked observations." if len(n) else ""
+    return f"Confirmed: the observation is linked to {label}.{total}"
 
 
-st.set_page_config(page_title="Object resolution analyst review", layout="wide")
-st.title("Analyst review queue")
-st.caption("All data is synthetic. Ranked by model match probability.")
+st.set_page_config(page_title="Object resolution review", layout="wide")
+st.title("Observations awaiting analyst review")
+st.caption(
+    "Each row is a new sighting that the model could link to a known object but is not "
+    f"sure enough to link automatically (between {REVIEW_T:.0%} and {AUTO_T:.0%} "
+    "confident). Most likely matches first. All data is synthetic."
+)
 
 if "flash" in st.session_state:
     st.success(st.session_state.pop("flash"))
 
 queue = run(f"""
-    SELECT obs_id, candidate_object_id, candidate_type, match_prob, runner_up_object_id,
-           runner_up_prob, dist_m, type_score, reported_type, producer, sensor, confidence,
-           lat, lon
-    FROM {SCHEMA}.review_queue
-    WHERE analyst_decision IS NULL
-    ORDER BY match_prob DESC
+    SELECT q.obs_id, q.obs_time, q.lat, q.lon, q.reported_type, q.producer, q.sensor,
+           q.confidence, q.match_prob, q.dist_m,
+           q.candidate_object_id, q.candidate_type, c.designator AS cand_designator,
+           c.lat AS cand_lat, c.lon AS cand_lon,
+           c.obs_count AS cand_obs_count, c.last_seen AS cand_last_seen,
+           q.runner_up_object_id, q.runner_up_prob, r.object_type AS runner_up_type,
+           r.designator AS ru_designator,
+           r.lat AS ru_lat, r.lon AS ru_lon,
+           rp.report_text, h.hero
+    FROM {SCHEMA}.review_queue q
+    JOIN {SCHEMA}.oms_objects c ON c.object_id = q.candidate_object_id
+    LEFT JOIN {SCHEMA}.oms_objects r ON r.object_id = q.runner_up_object_id
+    LEFT JOIN {SCHEMA}.bronze_reports rp ON rp.obs_id = q.obs_id
+    LEFT JOIN {SCHEMA}.demo_heroes h ON h.obs_id = q.obs_id
+    WHERE q.analyst_decision IS NULL
+    ORDER BY q.match_prob DESC
     LIMIT 50""")
-decided = run(f"SELECT COUNT(*) AS n FROM {SCHEMA}.review_decisions").iloc[0, 0]
+counts = run(f"""
+    SELECT (SELECT COUNT(*) FROM {SCHEMA}.review_queue WHERE analyst_decision IS NULL) AS pending,
+           (SELECT COUNT(*) FROM {SCHEMA}.review_decisions) AS decided,
+           (SELECT COUNT(*) FROM {SCHEMA}.oms_objects) AS objects""").iloc[0]
 
-left, right = st.columns(2)
-left.metric("Pending review (top 50 shown)", len(queue))
-right.metric("Decisions recorded", int(decided))
+m1, m2, m3 = st.columns(3)
+m1.metric("Awaiting review", f"{int(counts.pending):,}")
+m2.metric("Decisions made", f"{int(counts.decided):,}")
+m3.metric("Objects in the object system", f"{int(counts.objects):,}")
 
 if queue.empty:
-    st.info("No pending review items.")
+    st.info("Nothing awaiting review.")
     st.stop()
 
-st.dataframe(
-    queue[
-        [
-            "obs_id",
-            "candidate_object_id",
-            "candidate_type",
-            "match_prob",
-            "runner_up_prob",
-            "dist_m",
-            "producer",
-        ]
-    ],
+now = pd.Timestamp.now(tz="UTC").tz_localize(None)
+queue["candidate"] = [
+    object_label(r.candidate_type, r.cand_designator) for r in queue.itertuples()
+]
+queue["seen"] = [time_ago(t, now) for t in queue.obs_time]
+queue["source"] = [source_label(r.producer, r.sensor) for r in queue.itertuples()]
+queue["reported"] = queue.reported_type.fillna("Not stated")
+queue["note"] = queue.hero.map(lambda h: f"Demo case {h}" if pd.notna(h) else "")
+
+st.subheader(f"Review queue (top {len(queue)})")
+st.caption("Select a row to review it.")
+picked = st.dataframe(
+    queue[["match_prob", "candidate", "reported", "dist_m", "source", "seen", "note"]],
+    column_config={
+        "match_prob": st.column_config.ProgressColumn(
+            "Model confidence", format="percent", min_value=0, max_value=1
+        ),
+        "candidate": "Suggested object",
+        "reported": "Reported as",
+        "dist_m": st.column_config.NumberColumn("Distance", format="%d m"),
+        "source": "Source",
+        "seen": "Observed",
+        "note": "",
+    },
     use_container_width=True,
     hide_index=True,
+    on_select="rerun",
+    selection_mode="single-row",
 )
+rows = picked.selection.rows
+row = queue.iloc[rows[0] if rows else 0]
 
-labels = [
-    f"{r.obs_id} | {r.candidate_object_id} | p={r.match_prob:.3f}"
-    for r in queue.itertuples()
-]
-choice = st.selectbox("Review item", labels)
-row = queue.iloc[labels.index(choice)]
+st.divider()
+st.subheader(f"Should this observation be linked to {row.candidate}?")
+if not rows:
+    st.caption("Showing the top item; select another row above to change.")
 
 info, map_col = st.columns([1, 1])
 with info:
-    st.subheader("Why this score")
-    gap = row.match_prob - row.runner_up_prob if pd.notna(row.runner_up_prob) else None
+    has_runner_up = pd.notna(row.runner_up_prob) and pd.notna(row.runner_up_type)
+    gap = row.match_prob - row.runner_up_prob if has_runner_up else None
+    if gap is not None and gap < CLOSE_CALL_GAP:
+        st.warning(
+            f"Close call: {object_label(row.runner_up_type, row.ru_designator)} nearby is almost as likely "
+            f"({row.runner_up_prob:.0%} vs {row.match_prob:.0%}). Check the map."
+        )
+    else:
+        st.info(
+            f"The model is {row.match_prob:.0%} confident in this match, below the "
+            f"{AUTO_T:.0%} needed to link it automatically."
+        )
+
+    st.markdown("**The observation**")
     st.table(
         pd.DataFrame(
             {
-                "value": {
-                    "Match probability": f"{row.match_prob:.3f}",
-                    "Runner-up": (
-                        f"{row.runner_up_object_id} ({row.runner_up_prob:.3f})"
-                        if pd.notna(row.runner_up_prob)
-                        else "none"
+                "": {
+                    "Source": source_label(row.producer, row.sensor),
+                    "Reported as": type_agreement(
+                        row.reported_type, row.candidate_type
                     ),
-                    "Gap to runner-up": f"{gap:.3f}" if gap is not None else "n/a",
-                    "Distance to candidate (m)": f"{row.dist_m:.0f}",
-                    "Type score": f"{row.type_score:.1f}",
-                    "Reported type": row.reported_type or "missing",
-                    "Candidate type": row.candidate_type,
-                    "Producer / sensor": f"{row.producer} / {row.sensor}",
-                    "Confidence": f"{row.confidence:.2f}",
+                    "Source's own confidence": f"{row.confidence:.0%}",
+                    "Observed": f"{row.seen} ({row.obs_time:%d %b %Y %H:%M} UTC)",
+                    "Location": coords(row.lat, row.lon),
+                }
+            }
+        )
+    )
+    if pd.notna(row.report_text):
+        st.markdown("**Source report**")
+        st.markdown(f"> {row.report_text}")
+
+    st.markdown("**Why the model suggests this object**")
+    runner_up = (
+        f"{object_label(row.runner_up_type, row.ru_designator)}: "
+        f"{row.runner_up_prob:.0%} confidence, "
+        f"{distance_m(row.lat, row.lon, row.ru_lat, row.ru_lon):,.0f} m away"
+        if has_runner_up
+        else "None: no other object is a plausible match"
+    )
+    st.table(
+        pd.DataFrame(
+            {
+                "": {
+                    "Model confidence": f"{row.match_prob:.0%}",
+                    "Distance from observation": f"{row.dist_m:,.0f} m",
+                    "Object location": coords(row.cand_lat, row.cand_lon),
+                    "Type": type_agreement(row.reported_type, row.candidate_type),
+                    "Next most likely object": runner_up,
+                    "Object history": (
+                        f"{int(row.cand_obs_count)} linked observations, last seen "
+                        f"{time_ago(row.cand_last_seen, now)}"
+                    ),
                 }
             }
         )
     )
 
 with map_col:
-    st.subheader("Where")
-    ids = [row.candidate_object_id, row.runner_up_object_id or row.candidate_object_id]
-    objs = run(
-        f"SELECT object_id, object_type, lat, lon FROM {SCHEMA}.oms_objects "
-        "WHERE object_id IN (:a, :b)",
-        {"a": ids[0], "b": ids[1]},
-    ).set_index("object_id")
+    st.markdown("**Where**")
     m = folium.Map(location=[row.lat, row.lon], zoom_start=16)
     folium.CircleMarker(
-        [row.lat, row.lon], radius=8, color="#FF3621", fill=True, tooltip="observation"
+        [row.lat, row.lon],
+        radius=8,
+        color="#FF3621",
+        fill=True,
+        tooltip=f"This observation ({row.reported})",
     ).add_to(m)
-    for oid, role in (
-        (row.candidate_object_id, "candidate"),
-        (row.runner_up_object_id, "runner-up"),
-    ):
-        if oid and oid in objs.index:
-            o = objs.loc[oid]
-            folium.Marker(
-                [o.lat, o.lon],
-                tooltip=f"{role}: {oid} ({o.object_type})",
-                icon=folium.Icon(color="black" if role == "candidate" else "gray"),
-            ).add_to(m)
-    st_folium(m, height=360, use_container_width=True, returned_objects=[])
+    folium.Marker(
+        [row.cand_lat, row.cand_lon],
+        tooltip=f"Suggested: {row.candidate} ({row.match_prob:.0%})",
+        icon=folium.Icon(color="black"),
+    ).add_to(m)
+    if has_runner_up:
+        folium.Marker(
+            [row.ru_lat, row.ru_lon],
+            tooltip=(
+                f"Next most likely: {object_label(row.runner_up_type, row.ru_designator)} "
+                f"({row.runner_up_prob:.0%})"
+            ),
+            icon=folium.Icon(color="gray"),
+        ).add_to(m)
+    st_folium(m, height=420, use_container_width=True, returned_objects=[])
     st.caption(
-        "Red dot: the observation. Black pin: candidate object. Grey pin: runner-up."
+        "Red dot: the observation. Black pin: suggested object. "
+        "Grey pin: next most likely object. Hover for details."
     )
 
 dossier = run(
     f"SELECT dossier_text, generated_by FROM {SCHEMA}.object_dossiers WHERE object_id = :obj",
     {"obj": row.candidate_object_id},
 )
-st.subheader("Dossier")
-if dossier.empty:
-    st.info("No dossier has been generated for this candidate object.")
-else:
-    st.write(dossier.iloc[0].dossier_text)
-    st.caption(f"Generated by: {dossier.iloc[0].generated_by}")
+with st.expander("AI summary of the suggested object", expanded=not dossier.empty):
+    if dossier.empty:
+        st.write("No AI summary has been generated for this object yet.")
+    else:
+        st.write(dossier.iloc[0].dossier_text)
+        st.caption(
+            f"Generated by {dossier.iloc[0].generated_by} from governed tables only. "
+            "Bracketed IDs are the source reports it cites."
+        )
 
-st.subheader("Decision")
+st.subheader("Your decision")
 approve, reject = st.columns(2)
-if approve.button("Approve", type="primary", use_container_width=True):
+if approve.button("Confirm: same object", type="primary", use_container_width=True):
     st.session_state["flash"] = record_decision(
-        row.obs_id, row.candidate_object_id, "APPROVE"
+        row.obs_id, row.candidate_object_id, "APPROVE", row.candidate
     )
     st.rerun()
-if reject.button("Reject", use_container_width=True):
+if reject.button("Reject: not this object", use_container_width=True):
     st.session_state["flash"] = record_decision(
-        row.obs_id, row.candidate_object_id, "REJECT"
+        row.obs_id, row.candidate_object_id, "REJECT", row.candidate
     )
     st.rerun()
 st.caption(
-    "Decisions are stored in review_decisions and become training labels for the next retrain."
+    "Confirming links the observation to the object in the object system. "
+    "Every decision is saved and used to train the next version of the model."
 )
+
+with st.expander("System references"):
+    st.caption("For audit and support; not needed to make a decision.")
+    st.table(
+        pd.DataFrame(
+            {
+                "": {
+                    "Observation ID": row.obs_id,
+                    "Suggested object ID": row.candidate_object_id,
+                    "Next most likely object ID": row.runner_up_object_id or "none",
+                    "Decision table": f"{SCHEMA}.review_decisions",
+                }
+            }
+        )
+    )

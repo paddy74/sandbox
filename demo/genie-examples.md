@@ -10,6 +10,7 @@ I wrote these against the notebook's schema and could not run them on your works
 Data is synthetic. An observation is one report of something seen. An object is a tracked thing
 (Airport, Military Facility, Truck, Armored Fighting Vehicle, Aircraft) in the object system.
 - oms_objects: authoritative objects. source = 'OMS' (original) or 'DATABRICKS_NOMINATION' (new, status 'NOMINATED').
+  Name an object as object_type + ' ' + designator (e.g. 'Truck Bravo-12'); object_id is a system key.
 - bronze_observations: raw observations (obs_time, reported_type, producer, sensor, confidence, source_file).
 - silver_model_decisions: one row per observation. decision is AUTO (match_prob >= 0.9, associated to matched_object_id),
   REVIEW (0.5 to 0.9, waits for an analyst) or NOMINATE (< 0.5, clustered into a new object).
@@ -89,7 +90,7 @@ FROM workspace.obj_resolution_demo.gold_nominations;
 
 ### 8. Which nominated objects have the most supporting observations?
 ```sql
-SELECT object_id, object_type, obs_count, lat, lon
+SELECT concat(object_type, ' ', designator) AS object_name, obs_count, lat, lon
 FROM workspace.obj_resolution_demo.gold_nominations
 ORDER BY obs_count DESC, object_id
 LIMIT 10;
@@ -151,7 +152,7 @@ ORDER BY review_items DESC;
 
 ### 14. Which objects have the most linked observations?
 ```sql
-SELECT object_id, object_type, source, status, obs_count
+SELECT concat(object_type, ' ', designator) AS object_name, source, status, obs_count
 FROM workspace.obj_resolution_demo.oms_objects
 ORDER BY obs_count DESC, object_id
 LIMIT 10;

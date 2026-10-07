@@ -1,6 +1,6 @@
 # Databricks Apps install from this file, not pyproject.toml.
 # Presentation layer (Layer 4): map + object dossier + review queue.
-streamlit
+streamlit>=1.35  # dataframe row selection
 folium
 streamlit-folium
 databricks-sdk

@@ -136,6 +136,18 @@ def offset(
     )
 
 
+# Human-readable designator: CCO Arbitrary Identifier, linked by "designates" and stored as its text value.
+DESIGNATOR_IRI = "https://www.commoncoreontologies.org/ont00000923"
+PHONETIC = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel", "India",
+            "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa", "Quebec", "Romeo",
+            "Sierra", "Tango", "Uniform", "Victor", "Whiskey", "X-ray", "Yankee", "Zulu"]  # fmt: skip
+
+
+def designator(i: int) -> str:
+    """Unique call-sign style designator for the i-th object, e.g. Bravo-12."""
+    return f"{PHONETIC[i % len(PHONETIC)]}-{i // len(PHONETIC) + 1:02d}"
+
+
 N_OBJ, N_OBSERVED, N_NEW = 2000, 1500, 150
 N_TWIN, N_DUP = (
     25,
@@ -181,6 +193,10 @@ objects["last_seen"] = NOW - dt.timedelta(days=3)
 objects["obs_count"] = 0
 objects["source"] = "OMS"
 objects["status"] = "ACTIVE"
+# Deterministic (no rng call), so the seeded random stream and the cheat-card numbers do not change.
+objects["designator"] = [designator(i) for i in range(len(objects))]
+objects["designator_type"] = DESIGNATOR_IRI
+assert objects.designator.is_unique, "designators must be unique"
 
 
 def make_obs(obj_id, otype, lat, lon, k, producers=None, exact=False, partial=False):
@@ -514,6 +530,9 @@ bad = [
 assert not bad, (
     f"CCO does not place these under the generic label used by the generator: {bad}"
 )
+assert str(g.value(URIRef(DESIGNATOR_IRI), RDFS.label)) == "Arbitrary Identifier", (
+    f"{DESIGNATOR_IRI} is not CCO Arbitrary Identifier in {cco_local}"
+)
 display(spark.sql(f"SELECT label, iri FROM {S}.type_iri ORDER BY label"))
 
 # COMMAND ----------
@@ -708,11 +727,13 @@ FROM {S}.cc_final l
 WHERE l.label IN (SELECT label FROM {S}.cc_final GROUP BY label HAVING count(*) >= 2)""")
 spark.sql(f"""
 CREATE OR REPLACE TABLE {S}.gold_nominations AS
-SELECT m.object_id,
-       coalesce(max(c.reported_type), 'Unknown') AS object_type,
-       avg(c.lat) AS lat, avg(c.lon) AS lon, count(*) AS obs_count
-FROM {S}.silver_nom_members m JOIN {S}.nom_obs c ON m.obs_id = c.obs_id
-GROUP BY m.object_id""")
+SELECT *, concat('New-', lpad(CAST(row_number() OVER (ORDER BY object_id) AS STRING), 3, '0')) AS designator,
+       '{DESIGNATOR_IRI}' AS designator_type
+FROM (SELECT m.object_id,
+             coalesce(max(c.reported_type), 'Unknown') AS object_type,
+             avg(c.lat) AS lat, avg(c.lon) AS lon, count(*) AS obs_count
+      FROM {S}.silver_nom_members m JOIN {S}.nom_obs c ON m.obs_id = c.obs_id
+      GROUP BY m.object_id)""")
 r = spark.sql(
     f"SELECT count(*) noms, coalesce(sum(obs_count), 0) recovered FROM {S}.gold_nominations"
 ).first()
@@ -740,9 +761,9 @@ spark.sql(f"""
 MERGE INTO {S}.oms_objects t
 USING {S}.gold_nominations s ON t.object_id = s.object_id
 WHEN NOT MATCHED THEN INSERT (object_id, object_type, lat, lon, marking, first_seen, last_seen,
-                              obs_count, source, status)
+                              obs_count, source, status, designator, designator_type)
 VALUES (s.object_id, s.object_type, s.lat, s.lon, 'OPEN', current_timestamp(), current_timestamp(),
-        s.obs_count, 'DATABRICKS_NOMINATION', 'NOMINATED')""")
+        s.obs_count, 'DATABRICKS_NOMINATION', 'NOMINATED', s.designator, s.designator_type)""")
 NOTES["objects_after_merge"] = spark.table(f"{S}.oms_objects").count()
 print(
     f"OMS objects: {NOTES['objects_before_merge']} before, {NOTES['objects_after_merge']} after nominations"
@@ -978,7 +999,8 @@ def template_dossier(obj, rows: list) -> str:
     """No-LLM fallback: states the strongest linked report and the action."""
     top = rows[0]
     return (
-        f"{obj.object_id} is a {obj.object_type} in the object system with {len(rows)} linked reports. "
+        f"{obj.object_type} {obj.designator} (system ID {obj.object_id}) is in the object system with "
+        f"{len(rows)} linked reports. "
         f"Strongest link: [{top.report_id}] at match probability {top.match_prob}. "
         f"Recommended action: analyst review of the linked reports."
     )
@@ -997,8 +1019,9 @@ def build_dossier(object_id: str) -> tuple:
         for r in rows
     )
     prompt = (
-        f"You are assisting an analyst. Object {obj.object_id} is a {obj.object_type} "
-        f"in the object management system. Using ONLY the reports below, write a 4-sentence dossier: what the "
+        f"You are assisting an analyst. Object {obj.object_type} {obj.designator} (system ID {obj.object_id}) "
+        f"is in the object management system. Refer to it as {obj.object_type} {obj.designator}. "
+        f"Using ONLY the reports below, write a 4-sentence dossier: what the "
         f"object is, how consistently it has been observed, any uncertainty, and a recommended analyst action. "
         f"Cite report IDs in square brackets, one ID per bracket. Synthetic data.\n\nReports:\n{context}"
     )
