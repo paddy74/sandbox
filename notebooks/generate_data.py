@@ -190,7 +190,7 @@ for i, o in twin_src.iterrows():
     twin_pairs.append((o.to_dict(), tw, is_dup))
 objects = pd.concat([objects, pd.DataFrame(twin_rows)], ignore_index=True)
 objects["first_seen"] = NOW - dt.timedelta(days=30)
-objects["last_seen"] = NOW - dt.timedelta(days=3)
+objects["last_seen"] = NOW - dt.timedelta(days=3)  # replaced once observations exist
 objects["obs_count"] = 0
 objects["source"] = "OMS"
 objects["status"] = "ACTIVE"
@@ -277,6 +277,15 @@ obs.loc[noise_idx, "lon"] = rng.uniform(BBOX[2], BBOX[3], len(noise_idx))
 obs.loc[noise_idx, "reported_type"] = rng.choice(LEAVES, len(noise_idx))
 obs.loc[noise_idx, "true_object_id"] = "NOISE"
 obs["batch"] = rng.integers(1, 3, len(obs))
+
+# Object activity history (synthetic assumption: objects that are still active were seen more recently).
+# Own generator, so the observation stream above is unchanged.
+rng_seen = np.random.default_rng(43)
+active = objects.object_id.isin(obs.true_object_id)
+days_ago = np.where(
+    active, rng_seen.uniform(1, 14, len(objects)), rng_seen.uniform(1, 30, len(objects))
+)
+objects["last_seen"] = [NOW - dt.timedelta(days=float(d)) for d in days_ago]
 print(
     f"objects={len(objects)} (twins={N_TWIN}, duplicates={N_DUP}) observations={len(obs)} "
     f"(generic type={obs.reported_type.isin(GENERIC_LABELS).sum()}, "
@@ -541,6 +550,10 @@ display(spark.sql(f"SELECT label, iri FROM {S}.type_iri ORDER BY label"))
 # MAGIC %md ## 6. Candidate pairs and match model (Layer 2)
 # MAGIC H3 blocking (resolution 8, ring 1, <= 500 m). Features are cast to **DOUBLE** (Spark `CASE` returns DECIMAL, which
 # MAGIC breaks MLflow's JSON input example). Labels simulate past analyst adjudications via `true_object_id`.
+# MAGIC Context features compare each pair with the other candidates for the same observation: `n_candidates` (how crowded
+# MAGIC the area is) and `dist_gap_m` (this object's distance minus the nearest other candidate's; negative means it is the
+# MAGIC closest, -500 when it has no competitor). `days_since_last_seen` is the object's last sighting before the observation.
+# MAGIC The gap is on distance, not on match probability: a score gap would need the model's own output as an input.
 
 # COMMAND ----------
 
@@ -549,7 +562,12 @@ CREATE OR REPLACE TABLE {S}.silver_candidate_pairs AS
 WITH o AS (
   SELECT *, explode(h3_kring(h3_longlatash3(lon, lat, {H3_RES}), 1)) AS cell FROM {S}.bronze_observations),
 b AS (SELECT *, h3_longlatash3(lon, lat, {H3_RES}) AS cell FROM {S}.oms_objects WHERE source = 'OMS')
-SELECT * FROM (
+SELECT *,
+  CAST(count(*) OVER w AS DOUBLE) AS n_candidates,
+  CAST(coalesce(dist_m - CASE WHEN dist_m = min(dist_m) OVER w
+                              THEN try_element_at(array_sort(collect_list(dist_m) OVER w), 2)
+                              ELSE min(dist_m) OVER w END, -{MAX_DIST_M}) AS DOUBLE) AS dist_gap_m
+FROM (
   SELECT o.obs_id, b.object_id,
     {hav_sql("o.lat", "o.lon", "b.lat", "b.lon")} AS dist_m,
     CAST(CASE WHEN o.reported_type IS NULL THEN 0.5
@@ -558,10 +576,13 @@ SELECT * FROM (
     CAST(CAST(o.reported_type IS NULL AS INT) AS DOUBLE) AS type_missing,
     CAST(o.confidence AS DOUBLE) AS confidence,
     CAST(CAST(o.producer = 'analyst' AS INT) AS DOUBLE) AS is_analyst,
+    CAST(greatest(0, (unix_timestamp(o.obs_time) - unix_timestamp(b.last_seen)) / 86400) AS DOUBLE)
+      AS days_since_last_seen,
     CAST(o.true_object_id = b.object_id AS INT) AS label
   FROM o JOIN b ON o.cell = b.cell
   LEFT JOIN {S}.type_ancestors ta ON ta.type = b.object_type AND ta.ancestor = o.reported_type)
-WHERE type_score > 0 AND dist_m <= {MAX_DIST_M}""")
+WHERE type_score > 0 AND dist_m <= {MAX_DIST_M}
+WINDOW w AS (PARTITION BY obs_id)""")
 display(
     spark.sql(
         f"SELECT label, count(*) n FROM {S}.silver_candidate_pairs GROUP BY label"
@@ -576,7 +597,16 @@ from sklearn.ensemble import HistGradientBoostingClassifier  # noqa: E402
 from sklearn.metrics import average_precision_score, roc_auc_score  # noqa: E402
 from sklearn.model_selection import GroupShuffleSplit  # noqa: E402
 
-FEATURES = ["dist_m", "type_score", "type_missing", "confidence", "is_analyst"]
+FEATURES = [
+    "dist_m",
+    "type_score",
+    "type_missing",
+    "confidence",
+    "is_analyst",
+    "n_candidates",
+    "dist_gap_m",
+    "days_since_last_seen",
+]
 
 pdf = spark.table(f"{S}.silver_candidate_pairs").toPandas()
 pdf[FEATURES] = pdf[FEATURES].astype("float64")  # no Decimal/object columns
@@ -853,7 +883,8 @@ CREATE OR REPLACE VIEW {S}.review_queue AS
 WITH ranked AS (
   SELECT *, row_number() OVER (PARTITION BY obs_id ORDER BY match_prob DESC) rk FROM {S}.silver_scored_pairs)
 SELECT d.obs_id, d.matched_object_id AS candidate_object_id, o.object_type AS candidate_type,
-       d.match_prob, round(p1.dist_m, 0) AS dist_m, p1.type_score, b.reported_type, b.producer, b.sensor,
+       d.match_prob, round(p1.dist_m, 0) AS dist_m, p1.type_score, CAST(p1.n_candidates AS INT) AS n_candidates,
+       round(p1.days_since_last_seen, 1) AS days_since_last_seen, b.reported_type, b.producer, b.sensor,
        b.confidence, p2.object_id AS runner_up_object_id, round(p2.match_prob, 3) AS runner_up_prob,
        b.lat, b.lon, b.obs_time, rd.decision AS analyst_decision
 FROM {S}.silver_model_decisions d

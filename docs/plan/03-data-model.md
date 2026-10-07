@@ -80,11 +80,15 @@ Naming follows the pipeline notebook (`<catalog>.<schema>.<table>`; schema `obj_
 ### Layer 2: silver
 | Table                                              | Built from                                                                 | Key columns                                                                                                                                 |
 | -------------------------------------------------- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `silver_candidate_pairs`                           | H3 blocking (res 8, `h3_kring` 1) on `bronze_observations` × `oms_objects` | `obs_id`, `object_id`, `dist_m`, `type_score`, `type_missing`, `confidence`, `is_analyst`, `label`                                          |
+| `silver_candidate_pairs`                           | H3 blocking (res 8, `h3_kring` 1) on `bronze_observations` × `oms_objects` | `obs_id`, `object_id`, `dist_m`, `type_score`, `type_missing`, `confidence`, `is_analyst`, `n_candidates`, `dist_gap_m`, `days_since_last_seen`, `label` |
 | `silver_model_decisions`                           | Model scoring, best candidate per observation                              | `obs_id`, `matched_object_id`, `match_prob`, `decision` (`AUTO` ≥ 0.9, `REVIEW` 0.5–0.9, `NOMINATE` < 0.5 or no candidate), `model_version` |
 | MLflow run + UC model `obj_resolution_match_model` | `HistGradientBoostingClassifier` on `silver_candidate_pairs`               | Registration needs DOUBLE-cast features and an explicit signature                                                                           |
 
-Features (all DOUBLE): `dist_m`, `type_score`, `type_missing`, `confidence`, `is_analyst`. Do not add features without updating this spec.
+Features (all DOUBLE): `dist_m`, `type_score`, `type_missing`, `confidence`, `is_analyst`, `n_candidates`, `dist_gap_m`, `days_since_last_seen`. Do not add features without updating this spec.
+
+- `n_candidates`: candidate objects for the same observation (within 500 m, compatible type), including this one.
+- `dist_gap_m`: this pair's distance minus the nearest other candidate's; negative means this object is the closest, and -500 means no competitor. It stands in for the runner-up score gap, which cannot be a feature because it needs the model's own scores.
+- `days_since_last_seen`: days from the object's `last_seen` to the observation, floored at 0. Synthetic assumption: objects that are still observed were last seen 1 to 14 days ago, others 1 to 30 days ago (separate random seed, so the observations do not change).
 
 ### Layer 2 → 3: gold
 | Table                                                                             | Built from                                                                     | Key columns                                                               |

@@ -43,6 +43,7 @@ if not WAREHOUSE_ID:
 
 AUTO_T = 0.9  # same thresholds as notebooks/generate_data.py
 REVIEW_T = 0.5
+MAX_DIST_M = 500  # candidate search radius in notebooks/generate_data.py
 CLOSE_CALL_GAP = 0.15  # runner-up within this many points: say it is a close call
 
 SENSORS = {
@@ -174,10 +175,10 @@ if "flash" in st.session_state:
 
 queue = run(f"""
     SELECT q.obs_id, q.obs_time, q.lat, q.lon, q.reported_type, q.producer, q.sensor,
-           q.confidence, q.match_prob, q.dist_m,
+           q.confidence, q.match_prob, q.dist_m, q.n_candidates, q.days_since_last_seen,
            q.candidate_object_id, q.candidate_type, c.designator AS cand_designator,
            c.lat AS cand_lat, c.lon AS cand_lon,
-           c.obs_count AS cand_obs_count, c.last_seen AS cand_last_seen,
+           c.obs_count AS cand_obs_count,
            q.runner_up_object_id, q.runner_up_prob, r.object_type AS runner_up_type,
            r.designator AS ru_designator,
            r.lat AS ru_lat, r.lon AS ru_lon,
@@ -293,9 +294,12 @@ with info:
                     "Object location": coords(row.cand_lat, row.cand_lon),
                     "Type": type_agreement(row.reported_type, row.candidate_type),
                     "Next most likely object": runner_up,
+                    "Candidate objects in range": (
+                        f"{int(row.n_candidates)} within {MAX_DIST_M} m with a compatible type"
+                    ),
                     "Object history": (
-                        f"{int(row.cand_obs_count)} linked observations, last seen "
-                        f"{time_ago(row.cand_last_seen, now)}"
+                        f"{int(row.cand_obs_count)} linked observations; previously seen "
+                        f"{row.days_since_last_seen:.0f} days before this observation"
                     ),
                 }
             }
