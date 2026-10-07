@@ -1,0 +1,6 @@
+command: ["streamlit", "run", "app.py"]
+env:
+  - name: DATABRICKS_WAREHOUSE_ID
+    valueFrom: sql-warehouse # the SQL warehouse resource key set on the app
+  - name: OBJ_RESOLUTION_SCHEMA
+    value: workspace.obj_resolution_demo

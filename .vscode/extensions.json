@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-python.vscode-pylance",
+    "charliermarsh.ruff",
+    "detachhead.basedpyright",
+    "njpwerner.autodocstring",
+    "databricks.databricks"
+  ]
+}

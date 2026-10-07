@@ -1,0 +1,21 @@
+{
+  "[python]": {
+    "editor.defaultFormatter": "charliermarsh.ruff"
+  },
+  "python.analysis.typeCheckingMode": "off",
+  "python.languageServer": "Pylance",
+  "basedpyright.disableLanguageServices": true,
+  "python.defaultInterpreterPath": "python",
+  "python.analysis.extraPaths": ["obj_resolution"],
+  "autoDocstring.docstringFormat": "sphinx",
+  "files.exclude": {
+    "**/__pycache__": true,
+    "**/*.pyc": true
+  },
+  "search.exclude": {
+    "**/.venv": true,
+    "data/**": true
+  },
+  "cSpell.diagnosticLevel": "Hint",
+  "cSpell.words": ["basedpyright", "dbutils", "pyproject", "rdflib"]
+}

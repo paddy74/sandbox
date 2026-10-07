@@ -1,0 +1,8 @@
+# Databricks Apps install from this file, not pyproject.toml.
+# Presentation layer (Layer 4): map + object dossier + review queue.
+streamlit
+folium
+streamlit-folium
+databricks-sdk
+databricks-sql-connector
+pandas
