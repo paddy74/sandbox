@@ -89,6 +89,7 @@ Features (all DOUBLE): `dist_m`, `type_score`, `type_missing`, `confidence`, `is
 - `n_candidates`: candidate objects for the same observation (within 500 m, compatible type), including this one.
 - `dist_gap_m`: this pair's distance minus the nearest other candidate's; negative means this object is the closest, and -500 means no competitor. It stands in for the runner-up score gap, which cannot be a feature because it needs the model's own scores.
 - `days_since_last_seen`: days from the object's `last_seen` to the observation, floored at 0. Synthetic assumption: objects that are still observed were last seen 1 to 14 days ago, others 1 to 30 days ago (separate random seed, so the observations do not change).
+- Times: `obs_time` is when the intel behind an observation was collected; `report_time` is when the record was entered by an analyst or machine. Synthetic delay (`REPORT_DELAY_MIN` in `notebooks/pipeline/synthetic.py`): machine reports mostly within minutes (up to 2 h), analyst reports mostly within hours (up to a day), never after the present. An object's `first_seen` / `last_seen` are `obs_time` values (write-back and analyst approval use `greatest(last_seen, obs_time)`), never report or processing times.
 
 ### Layer 2 → 3: gold
 | Table                                                                             | Built from                                                                     | Key columns                                                               |

@@ -148,10 +148,14 @@ def record_decision(obs_id: str, object_id: str, decision: str, label: str) -> s
     )
     if decision == "REJECT":
         return f"Rejected: the observation is not linked to {label}."
+    # last_seen is when the object was observed (obs_time), not when the analyst decided.
     run(
-        f"UPDATE {SCHEMA}.oms_objects SET obs_count = obs_count + 1, "
-        "last_seen = current_timestamp() WHERE object_id = :obj",
-        {"obj": object_id},
+        f"MERGE INTO {SCHEMA}.oms_objects t "
+        f"USING (SELECT :obj AS object_id, obs_time FROM {SCHEMA}.bronze_observations "
+        "WHERE obs_id = :obs) s ON t.object_id = s.object_id "
+        "WHEN MATCHED THEN UPDATE SET t.obs_count = t.obs_count + 1, "
+        "t.last_seen = greatest(t.last_seen, s.obs_time)",
+        {"obj": object_id, "obs": obs_id},
         fetch=False,
     )
     n = run(

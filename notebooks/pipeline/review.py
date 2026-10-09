@@ -58,7 +58,8 @@ def adjudicate(
 
     A second decision on the same observation is ignored.
 
-    :param decision: ``APPROVE`` (also adds the observation to the object) or ``REJECT``.
+    :param decision: ``APPROVE`` (also adds the observation to the object and moves its
+        ``last_seen`` up to the observation's ``obs_time``) or ``REJECT``.
     :raises ValueError: for any other decision.
     """
     if decision not in ("APPROVE", "REJECT"):
@@ -73,6 +74,10 @@ def adjudicate(
       VALUES ('{obs_id}', '{object_id}', '{decision}', '{decided_by}', current_timestamp())""")
     if decision == "APPROVE":
         spark.sql(f"""
-          UPDATE {cfg.s}.oms_objects SET obs_count = obs_count + 1, last_seen = current_timestamp()
-          WHERE object_id = '{object_id}'""")
+          MERGE INTO {cfg.s}.oms_objects t
+          USING (SELECT '{object_id}' AS object_id, obs_time
+                 FROM {cfg.s}.bronze_observations WHERE obs_id = '{obs_id}') s
+          ON t.object_id = s.object_id
+          WHEN MATCHED THEN UPDATE SET t.obs_count = t.obs_count + 1,
+                                       t.last_seen = greatest(t.last_seen, s.obs_time)""")
     print(f"{decision}: {obs_id} -> {object_id}")

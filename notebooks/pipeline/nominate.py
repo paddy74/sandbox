@@ -29,7 +29,7 @@ def nominate(spark: SparkSession, cfg: Config) -> dict:
     s = cfg.s
     spark.sql(f"""
     CREATE OR REPLACE TABLE {s}.nom_obs AS
-    SELECT b.obs_id, b.lat, b.lon, b.reported_type
+    SELECT b.obs_id, b.lat, b.lon, b.reported_type, b.obs_time
     FROM {s}.silver_model_decisions d JOIN {s}.bronze_observations b ON d.obs_id = b.obs_id
     WHERE d.decision = 'NOMINATE'""")
     spark.sql(f"""
@@ -82,7 +82,8 @@ def nominate(spark: SparkSession, cfg: Config) -> dict:
            '{DESIGNATOR_IRI}' AS designator_type
     FROM (SELECT m.object_id,
                  coalesce(max(c.reported_type), 'Unknown') AS object_type,
-                 avg(c.lat) AS lat, avg(c.lon) AS lon, count(*) AS obs_count
+                 avg(c.lat) AS lat, avg(c.lon) AS lon, count(*) AS obs_count,
+                 min(c.obs_time) AS first_seen, max(c.obs_time) AS last_seen
           FROM {s}.silver_nom_members m JOIN {s}.nom_obs c ON m.obs_id = c.obs_id
           GROUP BY m.object_id)""")
     r = spark.sql(f"""
@@ -102,8 +103,10 @@ def nominate(spark: SparkSession, cfg: Config) -> dict:
 def write_back(spark: SparkSession, cfg: Config) -> dict:
     """``MERGE`` model results into ``oms_objects``.
 
-    ``AUTO`` associations add to each object's ``obs_count`` and refresh ``last_seen``;
-    nominations are inserted as ``NOMINATED`` objects. Not idempotent on its own: running it
+    ``AUTO`` associations add to each object's ``obs_count`` and move ``last_seen`` up to
+    their latest ``obs_time``; nominations are inserted as ``NOMINATED`` objects, first and
+    last seen at their cluster's observation times. Seen times are when the intel was
+    collected, never when the record was reported or processed. Not idempotent on its own: running it
     twice double-counts ``obs_count``, so re-run from ``synthetic.write_sources``.
 
     :return: cheat-card facts: object counts before and after.
@@ -111,16 +114,18 @@ def write_back(spark: SparkSession, cfg: Config) -> dict:
     before = spark.table(f"{cfg.s}.oms_objects").count()
     spark.sql(f"""
     MERGE INTO {cfg.s}.oms_objects t
-    USING (SELECT matched_object_id AS object_id, count(*) AS n
-           FROM {cfg.s}.silver_model_decisions WHERE decision = 'AUTO' GROUP BY matched_object_id) s
+    USING (SELECT d.matched_object_id AS object_id, count(*) AS n, max(b.obs_time) AS last_obs_time
+           FROM {cfg.s}.silver_model_decisions d JOIN {cfg.s}.bronze_observations b ON b.obs_id = d.obs_id
+           WHERE d.decision = 'AUTO' GROUP BY d.matched_object_id) s
     ON t.object_id = s.object_id
-    WHEN MATCHED THEN UPDATE SET t.obs_count = t.obs_count + s.n, t.last_seen = current_timestamp()""")
+    WHEN MATCHED THEN UPDATE SET t.obs_count = t.obs_count + s.n,
+                                 t.last_seen = greatest(t.last_seen, s.last_obs_time)""")
     spark.sql(f"""
     MERGE INTO {cfg.s}.oms_objects t
     USING {cfg.s}.gold_nominations s ON t.object_id = s.object_id
     WHEN NOT MATCHED THEN INSERT (object_id, object_type, lat, lon, marking, first_seen, last_seen,
                                   obs_count, source, status, designator, designator_type)
-    VALUES (s.object_id, s.object_type, s.lat, s.lon, 'OPEN', current_timestamp(), current_timestamp(),
+    VALUES (s.object_id, s.object_type, s.lat, s.lon, 'OPEN', s.first_seen, s.last_seen,
             s.obs_count, 'DATABRICKS_NOMINATION', 'NOMINATED', s.designator, s.designator_type)""")
     after = spark.table(f"{cfg.s}.oms_objects").count()
     print(f"OMS objects: {before} before, {after} after nominations")

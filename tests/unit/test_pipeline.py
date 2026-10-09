@@ -3,6 +3,7 @@
 import datetime as dt
 import math
 
+import pandas as pd
 from pipeline.config import Config, hav_sql
 from pipeline.genie import parse_genie_md
 from pipeline.synthetic import designator, generate
@@ -24,6 +25,14 @@ def test_generate_is_deterministic() -> None:
     a, b = generate(NOW), generate(NOW)
     assert len(a.objects) == 2025
     assert a.obs.equals(b.obs) and a.objects.equals(b.objects)
+    assert a.reports.equals(b.reports)
+
+
+def test_reports_entered_after_collection_and_before_now() -> None:
+    src = generate(NOW)
+    obs_time = pd.to_datetime(src.obs.obs_time)
+    report_time = pd.to_datetime(src.reports.report_time)
+    assert ((obs_time <= report_time) & (report_time <= NOW)).all()
 
 
 def test_hav_sql_distances() -> None:

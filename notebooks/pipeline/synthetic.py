@@ -49,6 +49,18 @@ N_TASKS = 40
 # min_lat, max_lat, min_lon, max_lon of an arbitrary area.
 BBOX = (39.0, 39.5, -105.5, -105.0)
 SENSORS = ["EO", "SAR", "FMV"]
+# Minutes from collection to the record being entered: (low, high, weight) ranges per producer.
+REPORT_DELAY_MIN = {
+    "algorithm": [(1, 5, 0.6), (5, 30, 0.3), (30, 120, 0.1)],  # machine: mostly minutes
+    "analyst": [
+        (30, 120, 0.3),
+        (120, 480, 0.5),
+        (480, 1440, 0.2),
+    ],  # hours, up to a day
+}
+assert all(math.isclose(sum(w for *_, w in r), 1) for r in REPORT_DELAY_MIN.values()), (
+    "REPORT_DELAY_MIN weights must sum to 1 per producer"
+)
 
 
 @dataclass
@@ -88,6 +100,26 @@ def offset(
         lat + dist_m * math.cos(b) / 111_320,
         lon + dist_m * math.sin(b) / (111_320 * math.cos(math.radians(lat))),
     )
+
+
+def report_delays(rng: np.random.Generator, producers: pd.Series) -> np.ndarray:
+    """Reporting delay per observation, from its producer's ``REPORT_DELAY_MIN`` ranges.
+
+    Each draw picks a range by weight, then a uniform value within it.
+
+    :return: delays in minutes, aligned with ``producers``.
+    :raises ValueError: for a producer with no delay ranges.
+    """
+    unknown = set(producers) - set(REPORT_DELAY_MIN)
+    if unknown:
+        raise ValueError(f"no REPORT_DELAY_MIN ranges for producers {sorted(unknown)}")
+    delays = np.empty(len(producers))
+    for producer, ranges in REPORT_DELAY_MIN.items():
+        mask = (producers == producer).to_numpy()
+        low, high, weight = (np.array(x) for x in zip(*ranges, strict=True))
+        idx = rng.choice(len(ranges), mask.sum(), p=weight)
+        delays[mask] = rng.uniform(low[idx], high[idx])
+    return delays
 
 
 def make_obs(
@@ -246,13 +278,22 @@ def generate(now: dt.datetime, seed: int = 42) -> Sources:
         f"missing type={obs.reported_type.isna().sum()}, noise={len(noise_idx)})"
     )
 
+    # Reports are entered after collection, never after now: a delay that would overshoot is
+    # redrawn uniformly within the time left. A separate generator keeps the stream above unchanged.
+    rng_report = np.random.default_rng(seed + 2)
+    obs_ts = pd.to_datetime(obs.obs_time)
+    delay = pd.to_timedelta(report_delays(rng_report, obs.producer), unit="min")
+    room = now - obs_ts
+    delay = delay.where(delay <= room, room * rng_report.uniform(0, 1, len(obs)))
+    report_time = (obs_ts + delay).dt.ceil("s").map(lambda t: t.isoformat())
+
     # Templated narrative standing in for finished reports, one per observation.
     obs["report_id"] = "RPT-" + obs.obs_id.str[4:]
     reports = pd.DataFrame(
         {
             "report_id": obs.report_id,
             "obs_id": obs.obs_id,
-            "report_time": obs.obs_time,
+            "report_time": report_time,
             "report_text": [
                 f"{r.producer.title()} report ({r.sensor}): {r.reported_type or 'unidentified object'} "
                 f"observed at {r.lat:.4f}, {r.lon:.4f} on {r.obs_time[:16].replace('T', ' ')}Z "
