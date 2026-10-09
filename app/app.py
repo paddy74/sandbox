@@ -4,7 +4,7 @@ One screen: pick a pending observation, see in plain language why the model sugg
 object (how sure it is, how far away, whether the type agrees, the next-best object), see both
 on a map, read the source report and the dossier if one exists, then confirm or reject the
 link. The decision is written to ``review_decisions`` and a confirm also updates the object in
-``oms_objects``, the same as ``adjudicate()`` in ``notebooks/generate_data.py``. System IDs are
+``oms_objects``, the same as ``adjudicate()`` in ``notebooks/pipeline/review.py``. System IDs are
 kept out of the main view and shown only as references. All data is synthetic.
 
 Deploy (Databricks Apps, Streamlit):

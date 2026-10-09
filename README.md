@@ -47,7 +47,7 @@ The demo resolves incoming observations into one trusted, explainable record per
 Nothing is deployed by default; each step is done in the target workspace.
 
 1. Run `notebooks/feasibility_tests.py` and complete its manual checks (section 12).
-2. Run `notebooks/generate_data.py` top to bottom to create the schema, tables, model and views.
+2. Run `notebooks/generate_data.py` top to bottom to create the schema, tables, model and views (stage code is in `notebooks/pipeline/`).
 3. Create the Databricks App from `app/` (SQL warehouse resource and schema grants are in the `app/app.py` docstring).
 4. The Genie space is created from `demo/genie-examples.md` by step 2 (section 15); hide `true_object_id` and `dup_of` in its UI once. Optionally add an AI/BI dashboard (the fallback to the app).
 

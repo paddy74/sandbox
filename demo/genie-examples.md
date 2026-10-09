@@ -1,6 +1,6 @@
 # Genie examples: curated prompts and SQL
 
-This file is the source of the Genie space: section 15 of `notebooks/generate_data.py` creates or updates the space from it (the instructions block, one example SQL per `###` heading, sample questions 1, 5 and 2, and every table the examples query). Edit here and re-run that cell; a section without a `sql` block fails the cell. All tables are in `workspace.obj_resolution_demo` (the cell swaps in the current catalog). All data is synthetic. Hide `true_object_id` and `dup_of` in the Genie UI once after the space is created; updates keep that, and none of these queries use them.
+This file is the source of the Genie space: section 15 of `notebooks/generate_data.py` (`sync_space` in `notebooks/pipeline/genie.py`) creates or updates the space from it (the instructions block, one example SQL per `###` heading, sample questions 1, 5 and 2, and every table the examples query). Edit here and re-run that cell; a section without a `sql` block fails the cell. All tables are in `workspace.obj_resolution_demo` (the cell swaps in the current catalog). All data is synthetic. Hide `true_object_id` and `dup_of` in the Genie UI once after the space is created; updates keep that, and none of these queries use them.
 
 I wrote these against the notebook's schema and could not run them on your workspace, so **run each once in the SQL editor** before saving it as a trusted example.
 

@@ -6,7 +6,7 @@ You are a senior data and AI engineer helping build a Databricks prototype for a
 
 **Simple Beats Impressive**: The story matters more than the build. Prefer the simplest component that works reliably on Databricks Free Edition. Every piece must be explainable to a business leader in one sentence.
 
-**Extend Before Creating**: Reuse patterns already proven in `notebooks/generate_data.py` before inventing new ones, and run `notebooks/feasibility_tests.py` before designing around an untested platform feature. Read neighboring files to match conventions.
+**Extend Before Creating**: Reuse the stage functions in `notebooks/pipeline/` (run in order by `notebooks/generate_data.py`) before inventing new ones, and run `notebooks/feasibility_tests.py` before designing around an untested platform feature. Read neighboring files to match conventions.
 
 **Analysis-First Philosophy**: Investigate and answer precisely; implement only when explicitly asked.
 
@@ -14,7 +14,7 @@ You are a senior data and AI engineer helping build a Databricks prototype for a
 
 ## Workflow Patterns
 
-1. **Pattern Discovery**: Check the pipeline notebook for a working version of what you need, and the feasibility checks for whether a platform feature is available.
+1. **Pattern Discovery**: Check `notebooks/pipeline/` for a working version of what you need, and the feasibility checks for whether a platform feature is available.
 2. **Context Assembly**: Read relevant notebooks and helpers before changing them.
 3. **Analysis Before Action**: Clarify unclear instructions; implement only on request.
 4. **Strategic Implementation**: Build in layer order (data foundation → model → GenAI → presentation). If a step stalls for more than 10 minutes, propose a fallback.
@@ -61,15 +61,16 @@ This repository is the build workspace for a demo of **observation-to-object res
 ```
 obj_resolution/  shared helpers (only if notebooks and app both need them)
 notebooks/       feasibility checks (run in Databricks only) and pipeline notebooks (Databricks .py source format)
+  pipeline/      one module per pipeline stage, imported by generate_data.py; each stage reads its inputs from tables
 app/             Databricks App (Layer 4)
 data/ontology    CCO ontology file
 docs/plan/       planning documents (see docs/plan/README.md)
 demo/            Genie example queries and space instructions
-tests/unit/      tests for obj_resolution/ helpers
+tests/unit/      tests for obj_resolution/ and notebooks/pipeline/ helpers
 ```
 
 ### Testing Instructions
 
 - Framework: [pytest](https://docs.pytest.org/); tests live in `tests/unit/`.
 - Run locally with `uv run pytest`, `uv run ruff check` and `uv run ruff format`.
-- Test pure-Python helpers in `obj_resolution/`; notebooks are validated by running them on Databricks.
+- Test pure-Python helpers in `obj_resolution/` and `notebooks/pipeline/`; notebooks are validated by running them on Databricks.
