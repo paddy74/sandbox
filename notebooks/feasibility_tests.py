@@ -442,8 +442,15 @@ if "clf" in globals():
                 }
             )
             mlflow.log_metrics(metrics)
+            # MLflow 3 saves with skops, which rejects classes it doesn't know unless trusted.
             mlflow.sklearn.log_model(
-                clf, "model", signature=sig, input_example=X.iloc[:5]
+                clf,
+                name="model",
+                signature=sig,
+                input_example=X.iloc[:5],
+                skops_trusted_types=[
+                    "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor"
+                ],
             )
         RUN_ID = run.info.run_id
         print("RUN_ID:", RUN_ID)

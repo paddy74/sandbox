@@ -26,6 +26,11 @@ FEATURES = [
 ]
 MODEL_NAME = "obj_resolution_match_model"
 MODEL_ALIAS = "champion"
+# MLflow 3 saves sklearn models with skops, which refuses classes it doesn't know; this is the
+# only one HistGradientBoostingClassifier needs (feasibility_tests.py section 5).
+SKOPS_TRUSTED_TYPES = [
+    "sklearn.ensemble._hist_gradient_boosting.predictor.TreePredictor"
+]
 
 
 def build_candidates(spark: SparkSession, cfg: Config) -> dict:
@@ -116,7 +121,11 @@ def train(
         )
         mlflow.log_metrics(metrics)
         mlflow.sklearn.log_model(
-            clf, "model", signature=signature, input_example=X.iloc[:5]
+            clf,
+            name="model",
+            signature=signature,
+            input_example=X.iloc[:5],
+            skops_trusted_types=SKOPS_TRUSTED_TYPES,
         )
     mlflow.set_registry_uri("databricks-uc")
     name = f"{cfg.s}.{MODEL_NAME}"
