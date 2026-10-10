@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from .icd203 import RANK, rank_sql
 from .synthetic import GENERIC_LABELS
 
 if TYPE_CHECKING:
@@ -18,12 +19,14 @@ def select_heroes(spark: SparkSession, cfg: Config) -> dict:
     **A** a clean auto-associate: an Armored Fighting Vehicle with the most corroborating
     ``AUTO`` observations. **B** a ``REVIEW`` observation sitting between two seeded look-alike
     twins (a Truck if possible, top score nearest 0.65). **C** a nominated cluster built mostly
-    from generic or untyped observations. Fails if the data has no candidate for a hero.
+    from weak observations: generic or missing type, or a source likelihood of at most roughly
+    even chance. Fails if the data has no candidate for a hero.
 
     :return: cheat-card facts: the three heroes.
     """
     s = cfg.s
     weak_list = ", ".join(f"'{t}'" for t in GENERIC_LABELS)
+    even = RANK["Roughly even chance"]  # a source likelihood at or below this is weak
     a = spark.sql(f"""
       SELECT d.matched_object_id AS object_id, count(*) n_obs, count(DISTINCT b.producer) n_producers,
              round(avg(d.match_prob), 3) AS avg_prob
@@ -54,10 +57,11 @@ def select_heroes(spark: SparkSession, cfg: Config) -> dict:
 
     c = spark.sql(f"""
       SELECT m.object_id, count(*) n_obs,
-             sum(CASE WHEN b.reported_type IS NULL OR b.reported_type IN ({weak_list}) THEN 1 ELSE 0 END) AS weak_obs
+             sum(CASE WHEN b.reported_type IS NULL OR b.reported_type IN ({weak_list})
+                        OR {rank_sql("b.likelihood")} <= {even} THEN 1 ELSE 0 END) AS weak_obs
       FROM {s}.silver_nom_members m JOIN {s}.bronze_observations b ON m.obs_id = b.obs_id
       GROUP BY m.object_id HAVING count(*) >= 3
-      ORDER BY sum(CASE WHEN b.true_object_id LIKE 'NEWP-%' THEN 1 ELSE 0 END) DESC, n_obs DESC LIMIT 1""").first()
+      ORDER BY weak_obs / count(*) DESC, n_obs DESC, m.object_id LIMIT 1""").first()
     assert c is not None, "no nominated cluster with >= 3 observations"
 
     heroes = [
@@ -66,7 +70,7 @@ def select_heroes(spark: SparkSession, cfg: Config) -> dict:
         ("B", b.object_id, b.obs_id, b.alt_object_id,
          f"{b.object_type}; REVIEW obs between twins: match_prob {b.p1} vs runner-up {b.p2}"),
         ("C", c.object_id, None, None,
-         f"nominated from {c.n_obs} observations, {c.weak_obs} with generic or missing type"),
+         f"nominated from {c.n_obs} observations, {c.weak_obs} with generic or missing type or a weak source likelihood"),
     ]  # fmt: skip
     spark.createDataFrame(
         heroes,

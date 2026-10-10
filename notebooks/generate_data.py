@@ -46,6 +46,7 @@ from pipeline import (
     dossier,
     genie,
     heroes,
+    icd203,
     ingest,
     model,
     nominate,
@@ -204,12 +205,12 @@ display(
 
 # COMMAND ----------
 
-# Analyst approves the model's top candidate for hero B; its obs_count goes up by one.
+# Analyst approves the model's top candidate for hero B with moderate confidence; its obs_count goes up by one.
 count_sql = (
     f"SELECT obs_count FROM {cfg.s}.oms_objects WHERE object_id = '{hero_b.object_id}'"
 )
 before = spark.sql(count_sql).first().obs_count
-review.adjudicate(spark, cfg, hero_b.obs_id, hero_b.object_id, "APPROVE")
+review.adjudicate(spark, cfg, hero_b.obs_id, hero_b.object_id, "APPROVE", "Moderate")
 print(
     f"{hero_b.object_id} obs_count: {before} -> {spark.sql(count_sql).first().obs_count}"
 )
@@ -219,19 +220,20 @@ display(spark.table(f"{cfg.s}.training_labels_from_review"))
 # COMMAND ----------
 
 # MAGIC %md ### 10b. Analyst decision form
-# MAGIC Pick a pending review item, choose APPROVE or REJECT, set **confirm = yes**, then run the cell below the form.
+# MAGIC Pick a pending review item, choose APPROVE or REJECT and your ICD 203 confidence (required), set **confirm = yes**,
+# MAGIC then run the cell below the form.
 # MAGIC The decision shows in the dashboard's review-queue table after a refresh. `confirm` defaults to `no`, so running the
 # MAGIC whole notebook never submits a decision. Re-run the form cell to refresh the list of pending items.
 
 # COMMAND ----------
 
 pending = spark.sql(f"""
-  SELECT obs_id, candidate_object_id, match_prob
+  SELECT obs_id, candidate_object_id, match_likelihood
   FROM {cfg.s}.review_queue WHERE analyst_decision IS NULL
   ORDER BY match_prob DESC LIMIT 25""").collect()
 assert pending, "no pending review items"
 review_choices = {
-    f"{r.obs_id} | {r.candidate_object_id} | p={r.match_prob}": (
+    f"{r.obs_id} | {r.candidate_object_id} | {r.match_likelihood}": (
         r.obs_id,
         r.candidate_object_id,
     )
@@ -242,10 +244,13 @@ dbutils.widgets.dropdown(
     "review_item",
     next(iter(review_choices)),
     list(review_choices),
-    "1. Review item (obs | candidate | match_prob)",
+    "1. Review item (obs | candidate | model assessment)",
 )
 dbutils.widgets.dropdown("decision", "APPROVE", ["APPROVE", "REJECT"], "2. Decision")
-dbutils.widgets.dropdown("confirm", "no", ["no", "yes"], "3. Confirm (yes to submit)")
+dbutils.widgets.dropdown(
+    "confidence", "(choose)", ["(choose)", *icd203.CONFIDENCE], "3. Your confidence"
+)
+dbutils.widgets.dropdown("confirm", "no", ["no", "yes"], "4. Confirm (yes to submit)")
 display(
     spark.createDataFrame(
         [(k, *v) for k, v in review_choices.items()],
@@ -259,6 +264,10 @@ if dbutils.widgets.get("confirm") != "yes":
     print(
         "Nothing submitted. Set confirm = yes in the form above, then re-run this cell."
     )
+elif dbutils.widgets.get("confidence") not in icd203.CONFIDENCE:
+    print(
+        "Nothing submitted. Choose your confidence in the form above, then re-run this cell."
+    )
 else:
     choice = dbutils.widgets.get("review_item")
     if choice not in review_choices:
@@ -266,11 +275,15 @@ else:
             "The list is stale: re-run the form cell above, then choose again"
         )
     review.adjudicate(
-        spark, cfg, *review_choices[choice], dbutils.widgets.get("decision")
+        spark,
+        cfg,
+        *review_choices[choice],
+        dbutils.widgets.get("decision"),
+        dbutils.widgets.get("confidence"),
     )
     dbutils.widgets.remove("confirm")  # back to "no", so the next run can't resubmit
     dbutils.widgets.dropdown(
-        "confirm", "no", ["no", "yes"], "3. Confirm (yes to submit)"
+        "confirm", "no", ["no", "yes"], "4. Confirm (yes to submit)"
     )
     print("Submitted. Re-run the form cell to refresh the pending list.")
 display(spark.table(f"{cfg.s}.review_decisions"))

@@ -6,6 +6,7 @@ import json
 from typing import TYPE_CHECKING
 
 from .config import hav_sql
+from .icd203 import rank_sql
 
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
@@ -17,7 +18,7 @@ FEATURES = [
     "dist_m",
     "type_score",
     "type_missing",
-    "confidence",
+    "likelihood_rank",
     "is_analyst",
     "n_candidates",
     "dist_gap_m",
@@ -32,8 +33,10 @@ def build_candidates(spark: SparkSession, cfg: Config) -> dict:
 
     Blocking keeps objects in the observation's H3 cell or its neighbours, within
     ``cfg.max_dist_m`` and with a compatible type. ``label`` comes from ``true_object_id`` and
-    stands in for past analyst adjudications; ground truth is never a feature. Features are
-    cast to DOUBLE because Spark ``CASE`` returns DECIMAL, which breaks MLflow's JSON input example.
+    stands in for past analyst adjudications; ground truth is never a feature.
+    ``likelihood_rank`` (1 to 7) is the source's ICD 203 likelihood term, so machine scores and
+    analyst terms enter the model on one scale. Features are cast to DOUBLE because Spark
+    ``CASE`` returns DECIMAL, which breaks MLflow's JSON input example.
 
     :return: no facts (empty dict).
     """
@@ -57,11 +60,11 @@ def build_candidates(spark: SparkSession, cfg: Config) -> dict:
                   WHEN o.reported_type = b.object_type THEN 1.0
                   WHEN ta.ancestor IS NOT NULL THEN 0.8 ELSE 0.0 END AS DOUBLE) AS type_score,
         CAST(CAST(o.reported_type IS NULL AS INT) AS DOUBLE) AS type_missing,
-        CAST(o.confidence AS DOUBLE) AS confidence,
+        CAST({rank_sql("o.likelihood")} AS DOUBLE) AS likelihood_rank,
         CAST(CAST(o.producer = 'analyst' AS INT) AS DOUBLE) AS is_analyst,
         CAST(greatest(0, (unix_timestamp(o.obs_time) - unix_timestamp(b.last_seen)) / 86400) AS DOUBLE)
           AS days_since_last_seen,
-        CAST(o.true_object_id = b.object_id AS INT) AS label
+        CAST(coalesce(o.true_object_id = b.object_id, false) AS INT) AS label
       FROM o JOIN b ON o.cell = b.cell
       LEFT JOIN {cfg.s}.type_ancestors ta ON ta.type = b.object_type AND ta.ancestor = o.reported_type)
     WHERE type_score > 0 AND dist_m <= {cfg.max_dist_m}
@@ -162,11 +165,13 @@ def score(
                 ELSE 'NOMINATE' END AS decision
     FROM {cfg.s}.bronze_observations ob LEFT JOIN best b ON ob.obs_id = b.obs_id AND b.rk = 1""")
 
-    # A NOMINATE is correct when the observation's real object is not in the object system.
+    # A NOMINATE is correct when the real object is not in the object system (or is noise:
+    # NULL truth); a match is correct only when it names the real object.
     bands = spark.sql(f"""
       SELECT decision, count(*) AS n,
-        round(avg(CASE WHEN decision = 'NOMINATE' THEN CAST(true_object_id NOT LIKE 'OBJ-%' AS DOUBLE)
-                       ELSE CAST(matched_object_id = true_object_id AS DOUBLE) END), 3) AS precision_vs_synthetic_truth
+        round(avg(CASE WHEN decision = 'NOMINATE' THEN CAST(coalesce(true_object_id, '') NOT LIKE 'OBJ-%' AS DOUBLE)
+                       ELSE CAST(coalesce(matched_object_id = true_object_id, false) AS DOUBLE) END), 3)
+          AS precision_vs_synthetic_truth
       FROM {cfg.s}.silver_model_decisions GROUP BY decision ORDER BY decision""").toPandas()
     bands["pct"] = (100 * bands.n / bands.n.sum()).round(1)
     print("IN-SAMPLE band counts and precision (synthetic ground truth):")

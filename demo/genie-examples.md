@@ -11,10 +11,14 @@ Data is synthetic. An observation is one report of something seen. An object is 
 (Airport, Military Facility, Truck, Armored Fighting Vehicle, Aircraft) in the object system.
 - oms_objects: authoritative objects. source = 'OMS' (original) or 'DATABRICKS_NOMINATION' (new, status 'NOMINATED').
   Name an object as object_type + ' ' + designator (e.g. 'Truck Bravo-12'); object_id is a system key.
-- bronze_observations: raw observations (obs_time, reported_type, producer, sensor, confidence, source_file).
+- bronze_observations: raw observations (obs_time, reported_type, producer, sensor, confidence, likelihood, source_file).
+  confidence is a machine score (NULL for analyst observations); likelihood is the source's ICD 203 term.
 - silver_model_decisions: one row per observation. decision is AUTO (match_prob >= 0.9, associated to matched_object_id),
   REVIEW (0.5 to 0.9, waits for an analyst) or NOMINATE (< 0.5, clustered into a new object).
-- review_queue: the REVIEW observations ranked by match_prob; analyst_decision is NULL until an analyst decides.
+- review_queue: the REVIEW observations ranked by match_prob; match_likelihood is its ICD 203 term.
+  analyst_decision and analyst_confidence (High, Moderate, Low) are NULL until an analyst decides.
+State likelihoods with the ICD 203 terms (almost no chance, very unlikely, unlikely, roughly even chance,
+likely, very likely, almost certain); never combine a likelihood and a confidence in one sentence.
 - gold_nominations: new objects created from clusters of unmatched observations.
 - object_dossiers: sourced summaries; cited_ids are report IDs.
 Count "unique objects with observations" through silver_model_decisions.matched_object_id where decision = 'AUTO'.
@@ -42,8 +46,8 @@ WHERE analyst_decision IS NULL;
 
 ### 3. Show the top 10 review items by match probability
 ```sql
-SELECT obs_id, candidate_object_id, candidate_type, match_prob, runner_up_object_id, runner_up_prob,
-       dist_m, producer, sensor, confidence
+SELECT obs_id, candidate_object_id, candidate_type, match_likelihood, runner_up_object_id,
+       runner_up_likelihood, dist_m, producer, sensor, likelihood
 FROM workspace.obj_resolution_demo.review_queue
 WHERE analyst_decision IS NULL
 ORDER BY match_prob DESC
@@ -161,9 +165,9 @@ LIMIT 10;
 ### 15. How many analyst decisions have been recorded?
 `review_decisions` is empty until hero B's approval cell has run.
 ```sql
-SELECT decision, COUNT(*) AS decisions
+SELECT decision, confidence, COUNT(*) AS decisions
 FROM workspace.obj_resolution_demo.review_decisions
-GROUP BY decision;
+GROUP BY decision, confidence;
 ```
 
 ## Which to use live

@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING
 
 from .heroes import load_heroes
+from .icd203 import likelihood_sql
 
 if TYPE_CHECKING:
     from pyspark.sql import Row, SparkSession
@@ -17,9 +18,13 @@ if TYPE_CHECKING:
 def retrieve(
     spark: SparkSession, cfg: Config, object_id: str, limit: int = 10
 ) -> list[Row]:
-    """Reports linked to an object by candidate-pair probability (>= 0.3), strongest first."""
+    """Reports linked to an object by candidate-pair probability (>= 0.3), strongest first.
+
+    ``match_likelihood`` is the ICD 203 term for the probability; only the term reaches the text.
+    """
     return spark.sql(f"""
-      SELECT r.report_id, p.obs_id, round(p.match_prob, 3) AS match_prob, b.producer, r.report_text
+      SELECT r.report_id, p.obs_id, {likelihood_sql("p.match_prob")} AS match_likelihood,
+             b.producer, r.report_text
       FROM {cfg.s}.silver_scored_pairs p
       JOIN {cfg.s}.bronze_reports r ON r.obs_id = p.obs_id
       JOIN {cfg.s}.bronze_observations b ON b.obs_id = p.obs_id
@@ -33,7 +38,7 @@ def template_dossier(obj: Row, rows: list[Row]) -> str:
     return (
         f"{obj.object_type} {obj.designator} (system ID {obj.object_id}) is in the object system with "
         f"{len(rows)} linked reports. "
-        f"Strongest link: [{top.report_id}] at match probability {top.match_prob}. "
+        f"Strongest link: [{top.report_id}], {top.match_likelihood.lower()} to be this object. "
         f"Recommended action: analyst review of the linked reports."
     )
 
@@ -55,7 +60,7 @@ def build_dossier(
     assert rows, f"no linked reports for {object_id}"
     allowed = {r.report_id for r in rows}
     context = "\n".join(
-        f"[{r.report_id}] ({r.producer}, match probability {r.match_prob}) {r.report_text}"
+        f"[{r.report_id}] ({r.producer}; {r.match_likelihood.lower()} to be this object) {r.report_text}"
         for r in rows
     )
     prompt = (
@@ -63,7 +68,9 @@ def build_dossier(
         f"is in the object management system. Refer to it as {obj.object_type} {obj.designator}. "
         f"Using ONLY the reports below, write a 4-sentence dossier: what the "
         f"object is, how consistently it has been observed, any uncertainty, and a recommended analyst action. "
-        f"Cite report IDs in square brackets, one ID per bracket. Synthetic data.\n\nReports:\n{context}"
+        f"Cite report IDs in square brackets, one ID per bracket. Express likelihood only with the ICD 203 "
+        f"terms used in the reports (e.g. likely, very likely); never give numbers or percentages. "
+        f"Synthetic data.\n\nReports:\n{context}"
     )
     assert "true_object_id" not in prompt, "ground truth must not reach the prompt"
     try:

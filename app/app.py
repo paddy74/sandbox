@@ -3,9 +3,10 @@
 One screen: pick a pending observation, see in plain language why the model suggested an
 object (how sure it is, how far away, whether the type agrees, the next-best object), see both
 on a map, read the source report and the dossier if one exists, then confirm or reject the
-link. The decision is written to ``review_decisions`` and a confirm also updates the object in
-``oms_objects``, the same as ``adjudicate()`` in ``notebooks/pipeline/review.py``. System IDs are
-kept out of the main view and shown only as references. All data is synthetic.
+link with a required ICD 203 confidence (High, Moderate, Low). Scores appear only as ICD 203
+likelihood terms. The decision is written to ``review_decisions`` and a confirm also updates
+the object in ``oms_objects``, the same as ``adjudicate()`` in ``notebooks/pipeline/review.py``.
+System IDs are kept out of the main view and shown only as references. All data is synthetic.
 
 Deploy (Databricks Apps, Streamlit):
 1. Create an app from this folder. Add a **SQL warehouse** resource with key ``sql-warehouse``
@@ -41,8 +42,7 @@ if not WAREHOUSE_ID:
         "'sql-warehouse' to the app (see app.yaml)"
     )
 
-AUTO_T = 0.9  # same thresholds as notebooks/generate_data.py
-REVIEW_T = 0.5
+AUTO_T = 0.9  # auto-link threshold, Config.auto_t in notebooks/pipeline/config.py
 MAX_DIST_M = 500  # candidate search radius in notebooks/generate_data.py
 CLOSE_CALL_GAP = 0.15  # runner-up within this many points: say it is a close call
 
@@ -52,6 +52,9 @@ SENSORS = {
     "FMV": "Full-motion video",
 }
 PRODUCERS = {"algorithm": "Automated detection", "analyst": "Analyst report"}
+# ICD 203 analytic confidence, as in notebooks/pipeline/icd203.py. Scores are shown only as
+# ICD 203 likelihood terms, which the review_queue view maps from the numbers.
+CONFIDENCE = ["High", "Moderate", "Low"]
 
 cfg = Config()
 
@@ -129,10 +132,17 @@ def type_agreement(reported: str | None, candidate: str) -> str:
     return f"Compatible: reported only as a general '{reported}'"
 
 
-def record_decision(obs_id: str, object_id: str, decision: str, label: str) -> str:
-    """Write one analyst decision; APPROVE also updates the object. Returns a status message."""
+def record_decision(
+    obs_id: str, object_id: str, decision: str, confidence: str, label: str
+) -> str:
+    """Write one analyst decision with its ICD 203 confidence; APPROVE also updates the object.
+
+    :return: a status message for the analyst.
+    """
     if decision not in ("APPROVE", "REJECT"):
         raise ValueError(f"decision must be APPROVE or REJECT, got {decision!r}")
+    if confidence not in CONFIDENCE:
+        raise ValueError(f"confidence must be one of {CONFIDENCE}, got {confidence!r}")
     if len(
         run(
             f"SELECT 1 FROM {SCHEMA}.review_decisions WHERE obs_id = :obs",
@@ -142,12 +152,19 @@ def record_decision(obs_id: str, object_id: str, decision: str, label: str) -> s
         return "This observation was already decided; nothing changed."
     run(
         f"INSERT INTO {SCHEMA}.review_decisions "
-        "VALUES (:obs, :obj, :dec, :who, current_timestamp())",
-        {"obs": obs_id, "obj": object_id, "dec": decision, "who": analyst_name()},
+        "(obs_id, object_id, decision, confidence, decided_by, decided_at) "
+        "VALUES (:obs, :obj, :dec, :conf, :who, current_timestamp())",
+        {
+            "obs": obs_id,
+            "obj": object_id,
+            "dec": decision,
+            "conf": confidence,
+            "who": analyst_name(),
+        },
         fetch=False,
     )
     if decision == "REJECT":
-        return f"Rejected: the observation is not linked to {label}."
+        return f"Rejected ({confidence.lower()} confidence): the observation is not linked to {label}."
     # last_seen is when the object was observed (obs_time), not when the analyst decided.
     run(
         f"MERGE INTO {SCHEMA}.oms_objects t "
@@ -163,15 +180,18 @@ def record_decision(obs_id: str, object_id: str, decision: str, label: str) -> s
         {"obj": object_id},
     )
     total = f" It now has {int(n.iloc[0, 0])} linked observations." if len(n) else ""
-    return f"Confirmed: the observation is linked to {label}.{total}"
+    return f"Confirmed ({confidence.lower()} confidence): the observation is linked to {label}.{total}"
 
 
 st.set_page_config(page_title="Object resolution review", layout="wide")
 st.title("Observations awaiting analyst review")
 st.caption(
-    "Each row is a new sighting that the model could link to a known object but is not "
-    f"sure enough to link automatically (between {REVIEW_T:.0%} and {AUTO_T:.0%} "
-    "confident). Most likely matches first. All data is synthetic."
+    "Each row is a new sighting that the model could link to a known object but not with "
+    "enough certainty to link automatically. Likelihoods use the ICD 203 terms; most likely "
+    "matches first. All data is synthetic."
+)
+st.caption(
+    f"Note: matches of {AUTO_T:.0%} or more are linked automatically, without review."
 )
 
 if "flash" in st.session_state:
@@ -179,11 +199,12 @@ if "flash" in st.session_state:
 
 queue = run(f"""
     SELECT q.obs_id, q.obs_time, q.lat, q.lon, q.reported_type, q.producer, q.sensor,
-           q.confidence, q.match_prob, q.dist_m, q.n_candidates, q.days_since_last_seen,
+           q.likelihood, q.match_prob, q.match_likelihood, q.dist_m, q.n_candidates, q.days_since_last_seen,
            q.candidate_object_id, q.candidate_type, c.designator AS cand_designator,
            c.lat AS cand_lat, c.lon AS cand_lon,
            c.obs_count AS cand_obs_count,
-           q.runner_up_object_id, q.runner_up_prob, r.object_type AS runner_up_type,
+           q.runner_up_object_id, q.runner_up_prob, q.runner_up_likelihood,
+           r.object_type AS runner_up_type,
            r.designator AS ru_designator,
            r.lat AS ru_lat, r.lon AS ru_lon,
            rp.report_text, h.hero
@@ -221,11 +242,19 @@ queue["note"] = queue.hero.map(lambda h: f"Demo case {h}" if pd.notna(h) else ""
 st.subheader(f"Review queue (top {len(queue)})")
 st.caption("Select a row to review it.")
 picked = st.dataframe(
-    queue[["match_prob", "candidate", "reported", "dist_m", "source", "seen", "note"]],
+    queue[
+        [
+            "match_likelihood",
+            "candidate",
+            "reported",
+            "dist_m",
+            "source",
+            "seen",
+            "note",
+        ]
+    ],
     column_config={
-        "match_prob": st.column_config.ProgressColumn(
-            "Model confidence", format="percent", min_value=0, max_value=1
-        ),
+        "match_likelihood": "Model assessment",
         "candidate": "Suggested object",
         "reported": "Reported as",
         "dist_m": st.column_config.NumberColumn("Distance", format="%d m"),
@@ -252,13 +281,14 @@ with info:
     gap = row.match_prob - row.runner_up_prob if has_runner_up else None
     if gap is not None and gap < CLOSE_CALL_GAP:
         st.warning(
-            f"Close call: {object_label(row.runner_up_type, row.ru_designator)} nearby is almost as likely "
-            f"({row.runner_up_prob:.0%} vs {row.match_prob:.0%}). Check the map."
+            f"Close call: {object_label(row.runner_up_type, row.ru_designator)} nearby is almost "
+            f"as likely a match (model assessment: {row.runner_up_likelihood.lower()}, against "
+            f"{row.match_likelihood.lower()} for {row.candidate}). Check the map."
         )
     else:
         st.info(
-            f"The model is {row.match_prob:.0%} confident in this match, below the "
-            f"{AUTO_T:.0%} needed to link it automatically."
+            f"The model assesses this match as {row.match_likelihood.lower()}: not "
+            "certain enough to link it automatically."
         )
 
     st.markdown("**The observation**")
@@ -270,7 +300,7 @@ with info:
                     "Reported as": type_agreement(
                         row.reported_type, row.candidate_type
                     ),
-                    "Source's own confidence": f"{row.confidence:.0%}",
+                    "Source's likelihood": row.likelihood,
                     "Observed": f"{row.seen} ({row.obs_time:%d %b %Y %H:%M} UTC)",
                     "Location": coords(row.lat, row.lon),
                 }
@@ -284,7 +314,7 @@ with info:
     st.markdown("**Why the model suggests this object**")
     runner_up = (
         f"{object_label(row.runner_up_type, row.ru_designator)}: "
-        f"{row.runner_up_prob:.0%} confidence, "
+        f"{row.runner_up_likelihood.lower()}, "
         f"{distance_m(row.lat, row.lon, row.ru_lat, row.ru_lon):,.0f} m away"
         if has_runner_up
         else "None: no other object is a plausible match"
@@ -293,7 +323,7 @@ with info:
         pd.DataFrame(
             {
                 "": {
-                    "Model confidence": f"{row.match_prob:.0%}",
+                    "Model assessment": row.match_likelihood,
                     "Distance from observation": f"{row.dist_m:,.0f} m",
                     "Object location": coords(row.cand_lat, row.cand_lon),
                     "Type": type_agreement(row.reported_type, row.candidate_type),
@@ -322,7 +352,7 @@ with map_col:
     ).add_to(m)
     folium.Marker(
         [row.cand_lat, row.cand_lon],
-        tooltip=f"Suggested: {row.candidate} ({row.match_prob:.0%})",
+        tooltip=f"Suggested: {row.candidate} ({row.match_likelihood.lower()})",
         icon=folium.Icon(color="black"),
     ).add_to(m)
     if has_runner_up:
@@ -330,7 +360,7 @@ with map_col:
             [row.ru_lat, row.ru_lon],
             tooltip=(
                 f"Next most likely: {object_label(row.runner_up_type, row.ru_designator)} "
-                f"({row.runner_up_prob:.0%})"
+                f"({row.runner_up_likelihood.lower()})"
             ),
             icon=folium.Icon(color="gray"),
         ).add_to(m)
@@ -355,15 +385,31 @@ with st.expander("AI summary of the suggested object", expanded=not dossier.empt
         )
 
 st.subheader("Your decision")
+confidence = st.selectbox(
+    "Your confidence in this judgement (ICD 203)",
+    CONFIDENCE,
+    index=None,
+    placeholder="Choose before confirming or rejecting",
+    key=f"confidence_{row.obs_id}",  # a new item starts unset
+    help="Confidence reflects the quality of the sources and reasoning behind your "
+    "judgement, not how likely the match is.",
+)
 approve, reject = st.columns(2)
-if approve.button("Confirm: same object", type="primary", use_container_width=True):
+if approve.button(
+    "Confirm: same object",
+    type="primary",
+    use_container_width=True,
+    disabled=confidence is None,
+):
     st.session_state["flash"] = record_decision(
-        row.obs_id, row.candidate_object_id, "APPROVE", row.candidate
+        row.obs_id, row.candidate_object_id, "APPROVE", confidence, row.candidate
     )
     st.rerun()
-if reject.button("Reject: not this object", use_container_width=True):
+if reject.button(
+    "Reject: not this object", use_container_width=True, disabled=confidence is None
+):
     st.session_state["flash"] = record_decision(
-        row.obs_id, row.candidate_object_id, "REJECT", row.candidate
+        row.obs_id, row.candidate_object_id, "REJECT", confidence, row.candidate
     )
     st.rerun()
 st.caption(

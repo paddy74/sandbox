@@ -121,7 +121,7 @@ Per AGENTS.md: if a step stalls more than 10 minutes, go to its fallback.
 | Reintroduce **GraphFrames**                                                                   | Decision made; label propagation in Spark SQL                                             |
 | Reintroduce **Vector Search**                                                                 | Decision made; the dossier is a structured join                                           |
 | Add **computer vision**                                                                       | Decision made                                                                             |
-| Add model features without updating file 03                                                   | Feature list is fixed: `dist_m`, `type_score`, `type_missing`, `confidence`, `is_analyst`, `n_candidates`, `dist_gap_m`, `days_since_last_seen` |
+| Add model features without updating file 03                                                   | Feature list is fixed: `dist_m`, `type_score`, `type_missing`, `likelihood_rank`, `is_analyst`, `n_candidates`, `dist_gap_m`, `days_since_last_seen` |
 | Use `true_object_id` as a feature or in the dossier prompt                                    | Leakage; it stands in for past adjudications only                                         |
 | Tune thresholds or retrain to improve metrics                                                 | Report honest synthetic numbers; thresholds are demo values                               |
 | Claim federation to real Postgres/MySQL, an ATO, a FedRAMP or IL level, or that a retrain ran | Not tested or not verified                                                                |

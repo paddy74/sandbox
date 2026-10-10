@@ -7,6 +7,8 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .icd203 import TERMS
+
 if TYPE_CHECKING:
     from pyspark.sql import SparkSession
 
@@ -47,13 +49,13 @@ def copy_into_observations(spark: SparkSession, cfg: Config) -> None:
     spark.sql(f"""
       CREATE TABLE IF NOT EXISTS {cfg.s}.bronze_observations (
         obs_id STRING, obs_time TIMESTAMP, lat DOUBLE, lon DOUBLE, reported_type STRING,
-        confidence DOUBLE, producer STRING, sensor STRING, true_object_id STRING,
+        confidence DOUBLE, likelihood STRING, producer STRING, sensor STRING, true_object_id STRING,
         source_file STRING, ingested_at TIMESTAMP)""")
     r = spark.sql(f"""
       COPY INTO {cfg.s}.bronze_observations
       FROM (SELECT obs_id, CAST(obs_time AS TIMESTAMP) AS obs_time,
                    CAST(lat AS DOUBLE) AS lat, CAST(lon AS DOUBLE) AS lon, reported_type,
-                   CAST(confidence AS DOUBLE) AS confidence, producer, sensor, true_object_id,
+                   CAST(confidence AS DOUBLE) AS confidence, likelihood, producer, sensor, true_object_id,
                    _metadata.file_name AS source_file, current_timestamp() AS ingested_at
             FROM '{cfg.landing["observations"]}')
       FILEFORMAT = JSON""").first()
@@ -70,7 +72,7 @@ def ingest(spark: SparkSession, cfg: Config) -> dict:
 
     Batch 1 is loaded, batch 2 is moved from ``staged`` into the landing folder and the same
     ``COPY INTO`` loads only the new file; a third run loads nothing. Fails if any load
-    duplicates rows.
+    duplicates rows or an observation lacks a valid ICD 203 likelihood term.
 
     :return: no facts (empty dict).
     """
@@ -90,6 +92,15 @@ def ingest(spark: SparkSession, cfg: Config) -> dict:
     assert spark.table(obs_t).count() == expected, (
         "COPY INTO re-run changed the row count"
     )
+    terms = ", ".join(f"'{t}'" for t in TERMS)
+    bad = (
+        spark.sql(
+            f"SELECT count(*) n FROM {obs_t} WHERE likelihood IS NULL OR likelihood NOT IN ({terms})"
+        )
+        .first()
+        .n
+    )
+    assert bad == 0, f"{bad} observations have no ICD 203 likelihood term"
 
     spark.sql(f"""
       CREATE TABLE IF NOT EXISTS {cfg.s}.bronze_reports (
